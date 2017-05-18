@@ -1,0 +1,30 @@
+#!/bin/bash
+set -x
+# mapping of arguments is directory from configurations file
+# $1 = hostname
+# $2 = interface
+# $3 = gpu device id
+# $4 = reader port
+# $5 = writer port
+# $6 = info port
+# $7 = baseband dada key 
+# $8 = filterbank dada key 
+# $9 = write_fb
+export LD_LIBRARY_PATH=/home/vlite-master/mtk/lib:/usr/cuda-6.5/lib64:${LD_LIBRARY_PATH}
+#sudo killall writer
+#sudo killall process
+#sleep 0.5
+
+# arguments should be
+# $1 = interface
+# $2 = writer port
+# $3 = info port
+# $4 = baseband dada key
+sudo -b /home/vlite-master/mtk/scripts/start_writer ${2} ${5} ${6} ${7}
+sleep 0.5
+
+# $1 = reader port
+# $2 = baseband dada key 
+# $3 = filterbank dada key 
+# $4 = write_fb
+/home/vlite-master/mtk/scripts/start_process ${4} ${7} ${8} ${9}

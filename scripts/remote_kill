@@ -1,0 +1,6 @@
+ssh vliteops@vlite-difx1 "sudo killall writer; sudo killall process_baseband" &> /dev/null
+ssh vliteops@vlite-difx2 "sudo killall writer; sudo killall process_baseband" &> /dev/null
+#ssh vliteops@vlite-difx3 "sudo killall writer; sudo killall process_baseband" > /dev/null
+#ssh vliteops@vlite-difx4 "sudo killall writer; sudo killall process_baseband" > /dev/null
+#ssh vliteops@vlite-difx5 "sudo killall writer; sudo killall process_baseband" > /dev/null
+#ssh vliteops@vlite-difx6 "sudo killall writer; sudo killall process_baseband" > /dev/null

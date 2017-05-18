@@ -1,0 +1,11 @@
+#!/bin/bash
+set -x
+conf="/home/vlite-master/mtk/config/hosts"
+grep -v "^#" < ${conf} | while read LINE
+do
+echo ${LINE}
+toks=( $LINE )
+ssh vliteops@${toks[0]} "nohup /home/vlite-master/mtk/scripts/start_single ${LINE} < /dev/null &> std.out" < /dev/null &> /dev/null
+done
+sleep 1
+/home/vlite-master/mtk/src/messenger ${conf}

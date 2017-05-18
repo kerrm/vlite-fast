@@ -1,0 +1,8 @@
+#/usr/bin/bash
+set -x
+# arguments should be
+# $1 = reader port
+# $2 = baseband dada key 
+# $3 = filterbank dada key 
+# $4 = write_fb
+/home/vlite-master/mtk/src/process_baseband -p ${1} -k ${2} -K ${3} -w ${4} &
