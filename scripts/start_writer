@@ -1,5 +1,5 @@
-#/usr/bin/bash
-set -x
+#!/bin/bash
+#set -x
 # run as root
 # arguments should be
 # $1 = interface

@@ -1,5 +1,5 @@
 #!/bin/bash
-set -x
+#set -x
 # mapping of arguments is directory from configurations file
 # $1 = hostname
 # $2 = interface
@@ -11,8 +11,6 @@ set -x
 # $8 = filterbank dada key 
 # $9 = write_fb
 export LD_LIBRARY_PATH=/home/vlite-master/mtk/lib:/usr/cuda-6.5/lib64:${LD_LIBRARY_PATH}
-#sudo killall writer
-#sudo killall process
 #sleep 0.5
 
 # arguments should be
