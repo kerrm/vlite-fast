@@ -15,32 +15,27 @@ process_baseband: process_baseband.o util.o utils.o
 	$(NVCC) -o process_baseband process_baseband.o utils.o util.o -lcufft -lcurand -L../lib -lvdifio -lpsrdada
 
 process_baseband.o: process_baseband.cu
-	$(NVCC) -g -O2 -c -o $@ -I/usr/cuda-6.5/include -I../include process_baseband.cu 
+	$(NVCC) -g -O2 --compiler-options -Wall -c -o $@ -I/usr/cuda-6.5/include -I../include process_baseband.cu 
 
 genbase: genbase.cu util.o
-	$(NVCC) -g -O2 -I/usr/cuda-6.5/include -I/usr/cuda-6.5/samples/common/inc -I/users/mkerr/mtk/include -c genbase.cu
+	$(NVCC) -g -O2 --compiler-options -Wall -I/usr/cuda-6.5/include -I/usr/cuda-6.5/samples/common/inc -I/users/mkerr/mtk/include -c genbase.cu
 	$(NVCC) -o genbase util.o genbase.o -lcufft -lcurand -L../lib -lvdifio -lpsrdada
 
-messenger:	messenger.c def.h utils.o
-	gcc -g -O2 -std=gnu99 -c messenger.c $(PARSE_FILES) -I../include -I$(INCDIFXMESSAGE)
+messenger:	messenger.c def.h utils.o $(PARSE_FILES)
+	gcc -g -O2 -Wall -std=gnu99 -c messenger.c $(PARSE_FILES) -I../include -I$(INCDIFXMESSAGE)
 	gcc -o $@ messenger.o utils.o $(PARSE_OBJ) -L../lib -lexpat -lpsrdada
 	chmod a+rx $@
 
 writer:	writer.c def.h utils.o
-	gcc -g -O2 -std=gnu99 -c writer.c -I../include -I$(INCDIFXMESSAGE)
+	gcc -g -O2 -Wall -std=gnu99 -c writer.c -I../include -I$(INCDIFXMESSAGE)
 	gcc -o $@ writer.o utils.o -L../lib -lpsrdada
 	chmod a+rx $@
 
-reader:	reader.c def.h utils.o
-	gcc -g -O2 -c reader.c -I../include -I$(INCDIFXMESSAGE)
-	gcc -o $@ reader.o utils.o -L../lib -lpsrdada
-	chmod a+rx $@
-
 util.o: util.cu
-	$(NVCC) -g -O2 -c -o $@ -I/usr/cuda-6.5/include -I../include util.cu
+	$(NVCC) -g -O2 --compiler-options -Wall -c -o $@ -I/usr/cuda-6.5/include -I../include util.cu
 
 utils.o: utils.h utils.c Connection.h
-	gcc -g -O2 -c -o $@ utils.c -I../include
+	gcc -g -O2 -Wall -std=gnu99 -c -o $@ utils.c -I../include
 
 clean:
 	rm -f *.o core* process_baseband genbase messenger writer

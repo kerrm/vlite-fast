@@ -7,7 +7,7 @@
 #include <netdb.h>      /* for gethostbyname() */
 #include <sys/errno.h>   /* defines ERESTART, EINTR */
 //#include <sys/wait.h>    /* defines WNOHANG, for wait() */
-//#include <unistd.h>
+#include <unistd.h>
 #include <linux/if_packet.h>
 #include <linux/if.h>
 #include <linux/if_ether.h>
@@ -15,16 +15,12 @@
 #include <sys/ioctl.h>
 #include <pwd.h>
 
-//#include "Connection.h"
 #include "utils.h"
 #include "def.h"
-//#include "ipcio.h"
 
 
 //Adapted from http://www.cs.rutgers.edu/~pxk/417/notes/sockets/demo-03.html
-int serve(int port, Connection* c)
-{	
-  int nbytes = -1; //received bytes
+int serve(int port, Connection* c) {	
 
   gethostname(c->hostname, MAXHOSTNAME);
 
@@ -102,14 +98,11 @@ int serve(int port, Connection* c)
 
   XXX: Check that socket is still open? (how?)
  */
-int wait_for_cmd(Connection* c)
-{
-  int nbytes, ii;
-  char tmp;
+int wait_for_cmd(Connection* c) {
 
   printf("in wait_for_cmd\n");
 
-  nbytes = read(c->rqst,c->buf,MAXINBUFSIZE);
+  int nbytes = read(c->rqst,c->buf,MAXINBUFSIZE);
   c->buf[nbytes] = '\0';
   printf("wait_for_cmd: read %d bytes: %.*s\n",nbytes,nbytes,c->buf);
   
@@ -128,14 +121,14 @@ int wait_for_cmd(Connection* c)
     case CMD_QUIT: return CMD_QUIT;
     case CMD_EVENT: return CMD_EVENT;
     default: {
-      printf("wait_for_cmd: Unrecognized command %c, defaulting to CMD_NONE.\n",c->buf[ii]);
+      printf("wait_for_cmd: Unrecognized command %c, defaulting to CMD_NONE.\n",c->buf[0]);
       return CMD_NONE;
     }
     }
   } 
   //Backlogged commands: return the most recent non-event command.
   else {
-    for(ii=nbytes-1; ii>=0; ii--) {
+    for(int ii=nbytes-1; ii>=0; ii--) {
       switch(c->buf[ii]) {
       case CMD_START: return CMD_START;
       case CMD_STOP: return CMD_STOP;
@@ -166,8 +159,7 @@ int wait_for_cmd(Connection* c)
   be copied? (only possible if someone destroys the data block while this
   function is running)
  */
-void event_to_file(const ipcio_t* db, FILE* evfd)
-{
+void event_to_file(const ipcio_t* db, FILE* evfd) {
   int ii, nbytes;
   
   //basic ring buffer, which we use from the ipcio_t file-like abstraction
@@ -201,8 +193,7 @@ void event_to_file(const ipcio_t* db, FILE* evfd)
 /* Connect to a specified server and port number */
 //Adapted from http://www.cs.rutgers.edu/~pxk/417/notes/sockets/demo-03.html
 //int conn(const char *host, int port, Connection *c)
-int conn(Connection *c)
-{
+int conn(Connection *c) {
   struct hostent *hp;	/* host information */
   
   //printf("conn(host=\"%s\", port=\"%d\")\n", c->hostname, c->port);
@@ -272,8 +263,7 @@ int conn(Connection *c)
 
 /* Disconnect from service socket */
 //Adapted from http://www.cs.rutgers.edu/~pxk/417/notes/sockets/demo-03.html
-void disconn(Connection *c)
-{
+void disconn(Connection *c) {
 	printf("disconn()\n");
 	//shutdown(fd, 2);    /* 2 means future sends & receives are disallowed */
 	shutdown(c->svc,2);
@@ -282,8 +272,7 @@ void disconn(Connection *c)
 
 /* adapted from http://www.cs.rutgers.edu/~pxk/417/notes/sockets/udp.html */
 /* From rawrx.c by Walter Brisken */
-int openRawSocket(const char *device, int *deviceIndex)
-{
+int openRawSocket(const char *device, int *deviceIndex) {
 	int s, v;
 	struct ifreq ifr;
 	struct sockaddr_ll sll;
@@ -347,8 +336,7 @@ int openRawSocket(const char *device, int *deviceIndex)
 	return s;
 }
 
-void change_file_owner (FILE* fp, char* user)
-{
+void change_file_owner (FILE* fp, char* user) {
   return;
   // change owner of logfile appropriately
   //struct group* g = getgrnam("vlite");
@@ -360,4 +348,69 @@ void change_file_owner (FILE* fp, char* user)
   }
 }
 
+VFASTConfig** parse_vfast_config (char* config_file, int* nconfig) {
+  FILE* fp = fopen (config_file, "r");
+  if (NULL == fp)
+    return NULL;
+  *nconfig = 0;
+  char* line = NULL;
+  size_t len = 0;
+  ssize_t read;
+  VFASTConfig* tmp[32];
+  while ((read = getline(&line, &len, fp) != -1)) {
+    if (line[0] == '#')
+      continue;
+    // remove newline/linefeed
+    //line[strcspn (line, "\r\n")] = '\0';
+    VFASTConfig* vc = tmp[*nconfig] = malloc (sizeof (VFASTConfig));
+    if (NULL == vc)
+    {
+      fprintf (stderr,"malloc failed\n");
+      return NULL;
+    }
+    if (sscanf (line,"%s %s %d %"PRIu64" %"PRIu64" %"PRIu64" %d %d %d",
+        vc->hostname, vc->iface, &(vc->gpu_dev_id), &(vc->reader_port),
+        &vc->writer_port, &(vc->info_port), &(vc->bb_dada_key), 
+        &(vc->fb_dada_key), &(vc->write_fb)) == 9)
+      (*nconfig)++;
 
+    else
+      free (vc);
+  }
+  free (line);
+  fclose (fp);
+  VFASTConfig** results = malloc (*nconfig*sizeof (VFASTConfig*));
+  for (int i = 0; i < *nconfig; ++i)
+    results[i] = tmp[i];
+  return results;
+
+}
+
+char* print_vfast_config (VFASTConfig* vc, FILE* fp) {
+  char* result = malloc (2048);
+  char s[128];
+  snprintf(result,2048,
+      "  hostname    = %s\n", vc->hostname);
+  snprintf(s,128,
+      "  iface       = %s\n", vc->iface); strcat(result,s);
+  snprintf(s,128,
+      "  gpuid       = %d\n", vc->gpu_dev_id); strcat(result,s);
+  snprintf(s,128,
+      "  reader_port = %"PRIu64"\n", vc->reader_port); strcat(result,s);
+  snprintf(s,128,
+      "  writer_port = %"PRIu64"\n", vc->writer_port); strcat(result,s);
+  snprintf(s,128,
+      "  info_port   = %"PRIu64"\n", vc->info_port); strcat(result,s);
+  snprintf(s,128,
+      "  bb_dada_key = %d\n", vc->bb_dada_key); strcat(result,s);
+  snprintf(s,128,
+      "  fb_dada_key = %d\n", vc->fb_dada_key); strcat(result,s);
+  snprintf(s,128,
+      "  write_fb    = %d\n", vc->write_fb); strcat(result,s);
+  if (fp) {
+    fprintf (fp, result);
+    free (result);
+    result = NULL;
+  }
+  return result;
+}

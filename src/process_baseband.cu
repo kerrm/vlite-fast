@@ -49,6 +49,18 @@ __global__ void sel_and_dig_2b (cufftReal*, unsigned char*, size_t n);
 __global__ void sel_and_dig_4b (cufftReal*, unsigned char*, size_t n);
 __global__ void sel_and_dig_8b (cufftReal*, unsigned char*, size_t n);
 
+void usage ()
+{
+  fprintf(stdout,"Usage: process [options]\n"
+	  "-k hexadecimal shared memory key for input (default: 40)\n"
+	  "-K hexadecimal shared memory key for output (default: 0=disabled)\n"
+	  "-p listening port number (default: %zu)\n"
+	  "-o print logging messages to stderr (as well as logfile)\n"
+	  "-w output filterbank data (0=no sources, 1=listed sources, 2=all sources [def])\n"
+	  "-b reduce output to b bits (2 [def], 4, and 8 are supported))\n"
+	  ,(uint64_t)READER_SERVICE_PORT);
+}
+
 
 void print_cuda_properties () {
   cudaDeviceProp prop;
@@ -177,23 +189,11 @@ void get_fbfile (char* fbfile, char* inchdr, vdif_header* vdhdr)
   snprintf (fbfile,128,"%s/%s_ea%02d.fil",DATADIR,currt_string,station_id);
 }
 
-void usage ()
-{
-  fprintf(stdout,"Usage: process [options]\n"
-	  "-k hexadecimal shared memory key for input (default: %x)\n"
-	  "-K hexadecimal shared memory key for output (default: %x, disabled)\n"
-	  "-p listening port number (default: %llu)\n"
-	  "-o print logging messages to stderr (as well as logfile)\n"
-	  "-w output filterbank data (0=no sources, 1=listed sources, 2=all sources [def])\n"
-	  "-b reduce output to b bits (2 [def], 4, and 8 are supported))\n"
-	  ,40,-1,READER_SERVICE_PORT);
-}
-
 int main (int argc, char *argv[])
 {
   int exit_status = EXIT_SUCCESS;
   key_t key_in = 0x40;
-  key_t key_out = -0x1;
+  key_t key_out = 0x0;
   uint64_t port = READER_SERVICE_PORT;
   int stderr_output = 0;
   int write_fb = 2;
@@ -214,8 +214,15 @@ int main (int argc, char *argv[])
       }
       break;
 
+    case 'K':
+      if (sscanf (optarg, "%x", &key_out) != 1) {
+        fprintf (stderr, "writer: could not parse key from %s\n", optarg);
+        return -1;
+      }
+      break;
+
     case 'p':
-      if (sscanf (optarg, "%llu", &port) != 1) {
+      if (sscanf (optarg, "%zu", &port) != 1) {
         fprintf (stderr, "writer: could not parse port from %s\n", optarg);
         return -1;
       }
@@ -270,7 +277,7 @@ int main (int argc, char *argv[])
   float alloc_time=0, hdr_time=0, read_time=0, todev_time=0, convert_time=0, fft_time=0, normalize_time=0, tscrunch_time=0, pscrunch_time=0, digitize_time=0, write_time=0, flush_time=0, misc_time=0,elapsed=0;
 #endif
 
-  multilog_t* log = multilog_open ("process",0);
+  multilog_t* log = multilog_open ("process_baseband",0);
   char logfile[128];
   time_t currt = time (NULL);
   struct tm tmpt; 
@@ -299,7 +306,7 @@ int main (int argc, char *argv[])
 
   // connect to output buffer (optional)
   dada_hdu_t* hdu_out = NULL;
-  if (key_out >= 0) {
+  if (key_out) {
     // connect to the output buffer
     hdu_out = dada_hdu_create (log);
     dada_hdu_set_key (hdu_out,key_out);
@@ -513,7 +520,7 @@ int main (int argc, char *argv[])
   cudaEventRecord(start,0);
 #endif
 
-  if (key_out >= 0) {
+  if (key_out) {
     //Write psrdada output header values
     write_psrdada_header (hdu_out, incoming_hdr);
   }
@@ -757,7 +764,7 @@ int main (int argc, char *argv[])
 #ifdef PROFILE
       cudaEventRecord(start,0);
 #endif 
-      if (key_out >= 0)
+      if (key_out)
         ipcio_write (hdu_out->data_block,(char *)fft_trim_u_host,maxn);
       fwrite(fft_trim_u_host,1,maxn,fb_fp);
       fb_bytes_written += maxn;
@@ -776,7 +783,7 @@ int main (int argc, char *argv[])
 #endif 
 
   dadacheck (dada_hdu_unlock_read (hdu_in));
-  if (key_out >=0 )
+  if (key_out)
     dadacheck (dada_hdu_unlock_write (hdu_out));
 
   // close files
@@ -818,7 +825,7 @@ int main (int argc, char *argv[])
   // clean up psrdada data structures
   dada_hdu_disconnect (hdu_in);
   dada_hdu_destroy (hdu_in);
-  if (key_out >= 0) {
+  if (key_out) {
     dada_hdu_disconnect (hdu_out);
     dada_hdu_destroy (hdu_out);
   }

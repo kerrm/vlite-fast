@@ -16,11 +16,12 @@
 void usage ()
 {
   fprintf(stdout,"Usage: writer [options]\n"
-	  "-k hexadecimal shared memory key  (default: %x)\n"
+	  "-k hexadecimal shared memory key  (default: 40)\n"
 	  "-p listening port number (default: %"PRIu64")\n"
+	  "-i information port number (default: %"PRIu64")\n"
 	  "-e ethernet device id (default: eth0)\n"
 	  "-o print logging messages to stderr (as well as logfile)\n"
-	  ,40,WRITER_SERVICE_PORT);
+	  ,(uint64_t)WRITER_SERVICE_PORT,(uint64_t)WRITER_INFO_PORT);
 }
 
 void dadacheck (int rcode)
@@ -28,7 +29,7 @@ void dadacheck (int rcode)
   if (rcode < 0)
   {
     printf("dada problem %d",rcode);
-    exit(1);
+    exit (EXIT_FAILURE);
   }
 }
 
@@ -99,6 +100,7 @@ void print_observation_document(char* result, ObservationDocument* od)
 
 int main(int argc, char** argv)
 {
+  int exit_status = EXIT_SUCCESS;
   key_t key = 0x40;
   multilog_t* log = multilog_open ("writer",0);
   dada_hdu_t* hdu = dada_hdu_create (log);
@@ -113,12 +115,12 @@ int main(int argc, char** argv)
   
   int state = STATE_STOPPED;
   uint64_t port = WRITER_SERVICE_PORT;
-  uint64_t iport = port + 21;
+  uint64_t iport = WRITER_INFO_PORT;
   char cmd = CMD_NONE;
-  int ii, arg, maxsock = 0; 
+  int arg, maxsock = 0; 
   int stderr_output = 0;
   
-  while ((arg = getopt(argc, argv, "hk:p:e:o")) != -1) {
+  while ((arg = getopt(argc, argv, "hk:p:i:e:o")) != -1) {
     switch(arg) {
 
     case 'h':
@@ -134,6 +136,13 @@ int main(int argc, char** argv)
       
     case 'p':
       if (sscanf (optarg, "%"PRIu64"", &port) != 1) {
+        fprintf (stderr, "writer: could not parse port from %s\n", optarg);
+        return -1;
+      }
+      break;
+
+    case 'i':
+      if (sscanf (optarg, "%"PRIu64"", &iport) != 1) {
         fprintf (stderr, "writer: could not parse port from %s\n", optarg);
         return -1;
       }
@@ -191,14 +200,13 @@ int main(int argc, char** argv)
     multilog_add (log, stderr);
 
 
-  iport = port + 21;
   dada_hdu_set_key (hdu,key);
 
   //Try to connect to existing data block
   if (dada_hdu_connect(hdu) < 0)
   {
     multilog (log, LOG_ERR, "Unable to connect to psrdada HDU.\n");
-    exit(EXIT_FAILURE);
+    exit (EXIT_FAILURE);
   }
   multilog (log, LOG_INFO, "Connected to psrdada HDU.\n");
 
@@ -282,11 +290,7 @@ int main(int argc, char** argv)
       }
       else if (cmd == CMD_QUIT) {
         multilog (log, LOG_INFO, "[STATE_STOPPED] received CMD_QUIT, exiting.\n");
-        shutdown(c.rqst,2);
-        multilog (log, LOG_INFO,
-            "dada_hdu_disconnect result = %d.\n", dada_hdu_disconnect (hdu));
-        change_file_owner (logfile_fp, "vliteops");
-        return 0;
+        break;
       }
     } // end STATE_STOPPED logic
 
@@ -367,7 +371,8 @@ int main(int argc, char** argv)
         if (dada_hdu_unlock_write (hdu) < 0) {
           multilog (log, LOG_ERR,
               "Writer: unable to unlock psrdada HDU, exiting\n");
-          exit (EXIT_FAILURE);
+          exit_status = EXIT_FAILURE;
+          break;
         }
         multilog (log, LOG_INFO, 
             "Wrote %d packets to psrdada buffer.\n",packets_written);
@@ -379,13 +384,9 @@ int main(int argc, char** argv)
       //if command is quit, close data block, shutdown listening socket, return
       else if (cmd == CMD_QUIT) {
         multilog (log, LOG_INFO, "[STATE_STARTED] received CMD_QUIT, exiting.\n");
-        shutdown (c.rqst,2);
-        change_file_owner (logfile_fp, "vliteops");
         multilog (log, LOG_INFO,
             "dada_hdu_unlock_write result = %d.\n", dada_hdu_unlock_write (hdu));
-        multilog (log, LOG_INFO,
-            "dada_hdu_disconnect result = %d.\n", dada_hdu_disconnect (hdu));
-        return 0;
+        break;
       }
 
       else if (cmd == CMD_START) {
@@ -423,7 +424,8 @@ int main(int argc, char** argv)
             if (ipcio_bytes_written != VDIF_PKT_SIZE) {
               multilog (log, LOG_ERR,
                   "Failed to write VDIF packet to psrdada buffer.\n");
-              exit (EXIT_FAILURE);
+              exit_status = EXIT_FAILURE;
+              break;
             }
             else
               packets_written++;
@@ -445,6 +447,11 @@ int main(int argc, char** argv)
     } // end STATE_STARTED logic
   } // end main loop over state/packets
   
-  return 0;
+  shutdown(c.rqst,2);
+  multilog (log, LOG_INFO,
+      "dada_hdu_disconnect result = %d.\n", dada_hdu_disconnect (hdu));
+  change_file_owner (logfile_fp, "vliteops");
+
+  return exit_status;
 } // end main
 
