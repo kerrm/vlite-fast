@@ -368,10 +368,10 @@ VFASTConfig** parse_vfast_config (char* config_file, int* nconfig) {
       fprintf (stderr,"malloc failed\n");
       return NULL;
     }
-    if (sscanf (line,"%s %s %d %"PRIu64" %"PRIu64" %"PRIu64" %d %d %d",
-        vc->hostname, vc->iface, &(vc->gpu_dev_id), &(vc->reader_port),
-        &vc->writer_port, &(vc->info_port), &(vc->bb_dada_key), 
-        &(vc->fb_dada_key), &(vc->write_fb)) == 9)
+    if (sscanf (line,"%s %s %d %"PRIu64" %"PRIu64" %"PRIu64" %d %d %d %d",
+        vc->hostname, vc->iface, &vc->gpu_dev_id, &vc->reader_port,
+        &vc->writer_port, &vc->info_port, &vc->bb_dada_key, 
+        &vc->fb_dada_key, &vc->write_fb, &vc->nbit) == 10)
       (*nconfig)++;
 
     else
@@ -407,6 +407,8 @@ char* print_vfast_config (VFASTConfig* vc, FILE* fp) {
       "  fb_dada_key = %d\n", vc->fb_dada_key); strcat(result,s);
   snprintf(s,128,
       "  write_fb    = %d\n", vc->write_fb); strcat(result,s);
+  snprintf(s,128,
+      "  nbit        = %d\n", vc->nbit); strcat(result,s);
   if (fp) {
     fprintf (fp, result);
     free (result);

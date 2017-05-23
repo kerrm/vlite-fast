@@ -20,6 +20,7 @@ typedef struct
   key_t bb_dada_key;
   key_t fb_dada_key;
   int write_fb;
+  int nbit;
 } VFASTConfig;
 
 int serve(int port, Connection* c);
