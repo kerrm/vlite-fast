@@ -26,6 +26,7 @@ extern "C" {
 // GPU options
 #define DEVICE 0
 #define NTHREAD 512
+//#define PROFILE 1
 
 #define VD_FRM 5032
 #define VD_DAT 5000
@@ -34,30 +35,36 @@ extern "C" {
 #define NFFT 12500 // number of samples to filterbank
 #define NCHAN 6251 //output filterbank channels, including DC
 #define NSCRUNCH 8 // time scrunch factor
-#define CHANMIN 2411 // minimum output channel (counting DC), from low
+
+//static volatile int CHANMIN=2411; // minimum output channel (counting DC), from low
+//static volatile int CHANMIN=1; // minimum output channel (counting DC), from low
+//static volatile int CHANMAX=6250; // maximum output channel (counting DC), from low
+//__device__ int CHANMIN_d=1;
+//__device__ int CHANMAX_d=1;
+#define CHANMIN 11 // minimum output channel (counting DC), from low
 #define CHANMAX 6250 // maximum output channel (counting DC), from low
-
-//#define PROFILE 1
-
 static volatile int NBIT = 2;
 
 __global__ void convertarray (cufftReal *, unsigned char *, size_t);
 __global__ void normalize (cufftComplex *, size_t);
-__global__ void pscrunch (cufftComplex *, size_t n);
+__global__ void normalize_running (cufftComplex *, size_t, cufftReal*, cufftReal*);
+__global__ void histogram ( unsigned char *, unsigned int*, size_t);
+__global__ void pscrunch (cufftComplex *, size_t);
 __global__ void tscrunch (cufftComplex *, cufftReal *, size_t);
-__global__ void sel_and_dig_2b (cufftReal*, unsigned char*, size_t n);
-__global__ void sel_and_dig_4b (cufftReal*, unsigned char*, size_t n);
-__global__ void sel_and_dig_8b (cufftReal*, unsigned char*, size_t n);
+__global__ void sel_and_dig_2b (cufftReal*, unsigned char*, size_t);
+__global__ void sel_and_dig_4b (cufftReal*, unsigned char*, size_t);
+__global__ void sel_and_dig_8b (cufftReal*, unsigned char*, size_t);
 
 void usage ()
 {
   fprintf(stdout,"Usage: process [options]\n"
 	  "-k hexadecimal shared memory key for input (default: 40)\n"
 	  "-K hexadecimal shared memory key for output (default: 0=disabled)\n"
-	  "-p listening port number (default: %zu)\n"
+	  "-p listening port number (default: %zu; if 0, disable)\n"
 	  "-o print logging messages to stderr (as well as logfile)\n"
 	  "-w output filterbank data (0=no sources, 1=listed sources, 2=all sources [def])\n"
 	  "-b reduce output to b bits (2 [def], 4, and 8 are supported))\n"
+	  //"-m retain MUOS band\n"
 	  ,(uint64_t)READER_SERVICE_PORT);
 }
 
@@ -66,6 +73,8 @@ void print_cuda_properties () {
   cudaDeviceProp prop;
   int device_idx=DEVICE;
   cudaGetDeviceProperties (&prop,device_idx);
+  int nsms;
+  cudaDeviceGetAttribute (&nsms,cudaDevAttrMultiProcessorCount,DEVICE);
   printf("%s:\n",prop.name);
   printf("maxThreadsPerBlock= %d\n",prop.maxThreadsPerBlock);
   printf("maxThreadsDim[0]= %d\n",prop.maxThreadsDim[0]);
@@ -74,6 +83,7 @@ void print_cuda_properties () {
   printf("maxGridSize[0]= %d\n",prop.maxGridSize[0]);
   printf("maxGridSize[1]= %d\n",prop.maxGridSize[1]);
   printf("maxGridSize[2]= %d\n",prop.maxGridSize[2]);
+  printf("multiProcessors= %d\n",nsms);
 }
 
 int write_psrdada_header (dada_hdu_t* hdu, char* inchdr)
@@ -158,7 +168,7 @@ int write_sigproc_header (FILE* output_fp, char* inchdr, vdif_header* vdhdr)
   ss = (mm-int(mm))*60;
   float sigproc_dec = int(dd)*1e4 + int(mm)*1e2 + ss;
   if (dec < 0) dec = -dec;
-  send_double ("src_decj",sigproc_dec,output_fp);
+  send_double ("src_dej",sigproc_dec,output_fp);
   send_int ("data_type",1,output_fp);
   send_double ("fch1",384+(CHANMIN-0.5)*chbw,output_fp);
   send_double ("foff",chbw,output_fp);//negative foff, fch1 is highest freq
@@ -172,7 +182,8 @@ int write_sigproc_header (FILE* output_fp, char* inchdr, vdif_header* vdhdr)
 }
 
 
-void get_fbfile (char* fbfile, char* inchdr, vdif_header* vdhdr)
+void get_fbfile (char* fbfile, ssize_t fbfile_len, char* inchdr, vdif_header* vdhdr,
+    char* histofile)
 {
   // Open up filterbank file using timestamp and antenna
   short int station_id = 0;
@@ -186,7 +197,13 @@ void get_fbfile (char* fbfile, char* inchdr, vdif_header* vdhdr)
   struct tm* utc_time = gmtime (&epoch_seconds);
   strftime(currt_string,sizeof(currt_string), "%Y%m%d_%H%M%S", utc_time);
   *(currt_string+15) = 0;
-  snprintf (fbfile,128,"%s/%s_ea%02d.fil",DATADIR,currt_string,station_id);
+  if (CHANMIN < 2411)
+    snprintf (fbfile,fbfile_len,"%s/%s_muos_ea%02d.fil",DATADIR,currt_string,station_id);
+  else
+    snprintf (fbfile,fbfile_len,"%s/%s_ea%02d.fil",DATADIR,currt_string,station_id);
+  if (NULL != histofile)
+    snprintf (histofile,fbfile_len,"%s/%s_ea%02d.histo",DATADIR,currt_string,station_id);
+
 }
 
 int main (int argc, char *argv[])
@@ -199,7 +216,7 @@ int main (int argc, char *argv[])
   int write_fb = 2;
 
   int arg = 0;
-  while ((arg = getopt(argc, argv, "hk:K:p:ow:b:")) != -1) {
+  while ((arg = getopt(argc, argv, "hk:K:p:omw:b:")) != -1) {
 
     switch (arg) {
 
@@ -231,6 +248,12 @@ int main (int argc, char *argv[])
     case 'o':
       stderr_output = 1;
       break;
+
+    /*
+    case 'm':
+      CHANMIN = 1;
+      break;
+    */
 
     case 'w':
       if (sscanf (optarg, "%d", &write_fb) != 1) {
@@ -274,7 +297,7 @@ int main (int argc, char *argv[])
   cudaEventCreate (&start_total);
   cudaEventCreate (&stop_total);
   cudaEventRecord (start_total,0);
-  float alloc_time=0, hdr_time=0, read_time=0, todev_time=0, convert_time=0, fft_time=0, normalize_time=0, tscrunch_time=0, pscrunch_time=0, digitize_time=0, write_time=0, flush_time=0, misc_time=0,elapsed=0;
+  float alloc_time=0, hdr_time=0, read_time=0, todev_time=0, convert_time=0, fft_time=0, histo_time=0,normalize_time=0, tscrunch_time=0, pscrunch_time=0, digitize_time=0, write_time=0, flush_time=0, misc_time=0,elapsed=0;
 #endif
 
   multilog_t* log = multilog_open ("process_baseband",0);
@@ -329,6 +352,12 @@ int main (int argc, char *argv[])
   unsigned char* udat_dev; cudacheck (
   cudaMalloc ((void**)&udat_dev,2*VLITE_RATE/10) );
 
+  // device memory for sample histograms
+  unsigned int* histo_dev; cudacheck (
+  cudaMalloc ((void**)&histo_dev,2*256*sizeof(unsigned int)) );
+  unsigned int* histo_hst; cudacheck (
+  cudaMallocHost ((void**)&histo_hst,2*256*sizeof(unsigned int)) );
+
   // set up memory for FFTs
   // device memory for 32-bit floats
   int numfft = 2*VLITE_RATE/10/NFFT;
@@ -362,6 +391,14 @@ int main (int argc, char *argv[])
   unsigned char* fft_trim_u_host; cudacheck (
   cudaMallocHost ((void**)&fft_trim_u_host,trim) );
 
+  /*
+  // memory for running bandpass correction; 2 pol * NCHAN
+  cufftReal* bp_sum1; cudacheck (
+  cudaMalloc ((void**)&bp_sum1,sizeof(cufftReal)*NCHAN*2));
+  cufftReal* bp_sum2; cudacheck (
+  cudaMalloc ((void**)&bp_sum1,sizeof(cufftReal)*NCHAN*2));
+  */
+
 #ifdef PROFILE
   cudaEventRecord(stop,0);
   cudaEventSynchronize(stop);
@@ -374,14 +411,16 @@ int main (int argc, char *argv[])
   uint8_t* dat = (uint8_t*)(frame_buff + 32);
 
   // connect to control socket
-  Connection c;
-  c.sockoptval = 1; //release port immediately after closing connection
-  if (serve (port, &c) < 0) {
-    multilog (log, LOG_ERR,
-      "Failed to create control socket on port %d.\n", port);
-    exit (EXIT_FAILURE);
+  Connection conn;
+  conn.sockoptval = 1; //release port immediately after closing connection
+  if (port) {
+    if (serve (port, &conn) < 0) {
+      multilog (log, LOG_ERR,
+        "Failed to create control socket on port %d.\n", port);
+      exit (EXIT_FAILURE);
+    }
+    fcntl (conn.rqst, F_SETFL, O_NONBLOCK); // set up for polling
   }
-  fcntl (c.rqst, F_SETFL, O_NONBLOCK); // set up for polling
   char cmd_buff[32];
 
   int quit = 0;
@@ -405,7 +444,8 @@ int main (int argc, char *argv[])
     // this could be an error condition, or it could be a result of shutting down the
     // data acquisition system; check to see if a CMD_QUIT has been issued in order to
     // log the appropriate outcome
-    ssize_t npoll_bytes = read (c.rqst, cmd_buff, 32);
+    ssize_t npoll_bytes = 0;
+    if (port) npoll_bytes = read (conn.rqst, cmd_buff, 32);
     if (npoll_bytes >  0) {
       for (int ib = 0; ib < npoll_bytes; ib++) {
         printf("Read command character %c.\n",cmd_buff[ib]);
@@ -485,15 +525,18 @@ int main (int argc, char *argv[])
   // set up "previous" samples and copy first frame into 1s-buffer
   int current_sec = getVDIFFrameSecond(vdhdr);
   int current_sample[2] = {-1,-1};
-  multilog (log, LOG_INFO, "Starting sec=%d\n",current_sec);
+  int current_thread = getVDIFThreadID (vdhdr) != 0;
+  multilog (log, LOG_INFO, "Starting sec=%d, thread=%d\n",current_sec,current_thread);
 
   // Open up filterbank file at appropriate time
-  char fbfile[128];
-  get_fbfile (fbfile, incoming_hdr, vdhdr);
+  char fbfile[256];
+  char histofile[256];
+  get_fbfile (fbfile, 256, incoming_hdr, vdhdr, histofile);
   if (write_fb == 0) {
     multilog (log, LOG_INFO,
         "Filterbank output disabled.  Would have written to %s.\n",fbfile);
-    snprintf (fbfile,128,"/dev/null"); 
+    snprintf (fbfile,256,"/dev/null"); 
+    snprintf (histofile,256,"/dev/null"); 
   }
   if (write_fb == 1) {
     char name[OBSERVATION_NAME_SIZE];
@@ -508,13 +551,17 @@ int main (int argc, char *argv[])
           "Source %s not on target list, disabling filterbank data.\n", name);
       multilog (log, LOG_INFO,
           "Filterbank output disabled.  Would have written to %s.\n",fbfile);
-      snprintf (fbfile,128,"/dev/null"); 
+      snprintf (fbfile,256,"/dev/null"); 
+      snprintf (histofile,256,"/dev/null"); 
     }
   }
 
   FILE *fb_fp = myopen (fbfile, "wb", true);
   multilog (log, LOG_INFO, "Writing data to %s.\n",fbfile);
   uint64_t fb_bytes_written = 0;
+
+  FILE *histo_fp = myopen (histofile, "wb", true);
+  multilog (log, LOG_INFO, "Writing histograms to %s.\n",histofile);
 
 #ifdef PROFILE
   cudaEventRecord(start,0);
@@ -533,6 +580,8 @@ int main (int argc, char *argv[])
   cudaEventSynchronize (stop);
   cudaEventElapsedTime (&hdr_time, start,stop);
 #endif
+
+  bool skipped_data_announced = false;
 
   while(true) // loop over data packets
   {
@@ -553,7 +602,10 @@ int main (int argc, char *argv[])
       // check for skipped data
       if (sample!=current_sample[thread] + 1)
       {
-        multilog (log, LOG_INFO, "Found skipped data in current second!\n");
+        if (!skipped_data_announced) {
+          multilog (log, LOG_INFO, "Found skipped data in current second!\n");
+          skipped_data_announced = true;
+        }
         // set the intervening memory to zeros
         idx = VLITE_RATE*thread + (current_sample[thread]+1)*VD_DAT;
         memset (udat+idx,0,VD_DAT*(sample-current_sample[thread]-1));
@@ -592,13 +644,14 @@ int main (int argc, char *argv[])
       // leap seconds, or when there are major data drops.  When that
       // happens, just restart the code.
       multilog (log, LOG_ERR,
-        "Major data skip!  (%d vs. %d) Aborting this observation.\n",
-         second,current_sec);
+        "Major data skip!  (%d vs. %d; thread = %d) Aborting this observation.\n",
+         second,current_sec,thread);
          break;
     }
 
     // every 1s, check for a QUIT command
-    int npoll_bytes = read (c.rqst, cmd_buff, 32);
+    ssize_t npoll_bytes = 0;
+    if (port) npoll_bytes = read (conn.rqst, cmd_buff, 32);
     if (npoll_bytes >  0) {
       for (int ib = 0; ib < npoll_bytes; ib++) {
         printf("Read command character %c.\n",cmd_buff[ib]);
@@ -616,6 +669,7 @@ int main (int argc, char *argv[])
     }
 
     // check that both buffers are full
+    skipped_data_announced = false;
     current_sec = second;
 
     // need to dispatch the current buffer; zero fill any discontinuity
@@ -638,6 +692,7 @@ int main (int argc, char *argv[])
     size_t nchunk = numfft*NFFT; // samples in a chunk, 2*VLITE_RATE/10
     for (int i = 0; i < 10; ++i)
     {
+
 #ifdef PROFILE
       cudaEventRecord(start,0);
 #endif 
@@ -653,6 +708,21 @@ int main (int argc, char *argv[])
       cudaEventSynchronize(stop);
       cudaEventElapsedTime(&elapsed,start,stop);
       todev_time += elapsed;
+#endif
+
+#ifdef PROFILE
+      cudaEventRecord(start,0);
+#endif 
+      // compute sample histogram
+      // memset implicitly barriers between blocks, necessary
+      cudacheck (cudaMemset (histo_dev,0,2*256*sizeof(unsigned int)));
+      histogram<<<nsms*32,512>>> (udat_dev,histo_dev,nchunk);
+      cudacheck (cudaGetLastError() );
+#ifdef PROFILE
+      cudaEventRecord(stop,0);
+      cudaEventSynchronize(stop);
+      cudaEventElapsedTime(&elapsed,start,stop);
+      histo_time += elapsed;
 #endif
 
 #ifdef PROFILE
@@ -750,6 +820,9 @@ int main (int argc, char *argv[])
       // copy filterbanked data back to host
       cudacheck (cudaMemcpy (
             fft_trim_u_host,fft_trim_u,maxn,cudaMemcpyDeviceToHost) );
+      // copy histograms
+      cudacheck (cudaMemcpy (
+            histo_hst,histo_dev,2*256*sizeof(unsigned int),cudaMemcpyDeviceToHost) );
 
 #ifdef PROFILE
       cudaEventRecord(stop,0);
@@ -766,8 +839,9 @@ int main (int argc, char *argv[])
 #endif 
       if (key_out)
         ipcio_write (hdu_out->data_block,(char *)fft_trim_u_host,maxn);
-      fwrite(fft_trim_u_host,1,maxn,fb_fp);
+      fwrite (fft_trim_u_host,1,maxn,fb_fp);
       fb_bytes_written += maxn;
+      fwrite (histo_hst,sizeof(unsigned int),512,histo_fp);
 #ifdef PROFILE
       cudaEventRecord(stop,0);
       cudaEventSynchronize(stop);
@@ -788,7 +862,15 @@ int main (int argc, char *argv[])
 
   // close files
   fclose(fb_fp);
+  fclose(histo_fp);
   multilog (log, LOG_INFO, "Wrote %.2f MB to %s\n",fb_bytes_written*1e-6,fbfile);
+
+  // TODO -- if it was a scan observation and not long enough to complete a full cycle,, delete the file
+  /*
+  if (fb_bytes_written == 0) {
+    remove (fname);
+  }
+  */
 
 #ifdef PROFILE
   cudaEventRecord(stop,0);
@@ -799,10 +881,11 @@ int main (int argc, char *argv[])
   cudaEventSynchronize(stop_total);
   float total_time;
   cudaEventElapsedTime(&total_time,start_total,stop_total);
-  float sub_time = alloc_time + hdr_time + read_time + todev_time + convert_time + fft_time + normalize_time + pscrunch_time + tscrunch_time + digitize_time + write_time + flush_time + misc_time;
+  float sub_time = alloc_time + hdr_time + read_time + todev_time + convert_time + fft_time + histo_time + normalize_time + pscrunch_time + tscrunch_time + digitize_time + write_time + flush_time + misc_time;
   multilog (log, LOG_INFO, "Alloc Time..%.3f\n", alloc_time*1e-3);
   multilog (log, LOG_INFO, "Read Time...%.3f\n", read_time*1e-3);
   multilog (log, LOG_INFO, "Copy To Dev.%.3f\n", todev_time*1e-3);
+  multilog (log, LOG_INFO, "Histogram...%.3f\n", histo_time*1e-3);
   multilog (log, LOG_INFO, "Convert.....%.3f\n", convert_time*1e-3);
   multilog (log, LOG_INFO, "FFT.........%.3f\n", fft_time*1e-3);
   multilog (log, LOG_INFO, "Normalize...%.3f\n", normalize_time*1e-3);
@@ -819,7 +902,7 @@ int main (int argc, char *argv[])
   } // end loop over observations
 
   // close sockets and files
-  shutdown (c.rqst, 2);
+  shutdown (conn.rqst, 2);
   fclose (logfile_fp);
 
   // clean up psrdada data structures
@@ -831,13 +914,15 @@ int main (int argc, char *argv[])
   }
 
   //free memory
-  cudaFreeHost(udat);
-  cudaFree(udat_dev);
-  cudaFree(fft_in);
-  cudaFree(fft_out);
-  cudaFree(fft_ave);
-  cudaFree(fft_trim_u);
-  cudaFreeHost(fft_trim_u_host);
+  cudaFreeHost (udat);
+  cudaFree (udat_dev);
+  cudaFree (fft_in);
+  cudaFree (fft_out);
+  cudaFree (fft_ave);
+  cudaFree (fft_trim_u);
+  cudaFreeHost (fft_trim_u_host);
+  cudaFree (histo_dev);
+  cudaFreeHost (histo_dev);
 
   return exit_status;
     
@@ -845,12 +930,10 @@ int main (int argc, char *argv[])
 
 
 //convert unsigned char time array to float
-__global__ void convertarray(cufftReal *time, unsigned char *utime, size_t n)
+__global__ void convertarray (cufftReal *time, unsigned char *utime, size_t n)
 {
-  for (
-      int i = threadIdx.x + blockIdx.x*blockDim.x; 
-      i < n; 
-      i += blockDim.x*gridDim.x)
+  for (int i = threadIdx.x + blockIdx.x*blockDim.x; 
+      i < n; i += blockDim.x*gridDim.x)
   {
     if (utime[i] == 0) 
       time[i] = 0;
@@ -859,10 +942,27 @@ __global__ void convertarray(cufftReal *time, unsigned char *utime, size_t n)
   }
 }
 
+__global__ void histogram ( unsigned char *utime, unsigned int* histo, size_t n)
+{
+  __shared__ unsigned int lhisto[512];
+  lhisto[threadIdx.x] = 0;
+  __syncthreads ();
+
+  int i = threadIdx.x + blockIdx.x*blockDim.x;
+  for (; i < n/2; i += blockDim.x*gridDim.x)
+    atomicAdd (lhisto+utime[i], 1);
+  for (; i < n; i += blockDim.x*gridDim.x)
+    atomicAdd ((lhisto+256)+utime[i], 1);
+  __syncthreads ();
+
+  // MUST run with 512 threads for this global accumulation to work
+  atomicAdd ( histo+threadIdx.x, lhisto[threadIdx.x]);
+}
+
 // detect total power and normalize the polarizations in place
 // use a monolithic kernel pattern here since the total number of threads
 // should be relatively small
-__global__ void normalize(cufftComplex *fft_out, size_t ntime)
+__global__ void normalize (cufftComplex *fft_out, size_t ntime)
 {
   int i = threadIdx.x + blockIdx.x*blockDim.x; 
   if (i >= NCHAN*2) return;
@@ -888,8 +988,41 @@ __global__ void normalize(cufftComplex *fft_out, size_t ntime)
   }
 }
 
+// detect total power and normalize the polarizations in place
+// use a monolithic kernel pattern here since the total number of threads
+// should be relatively small
+__global__ void normalize_running (cufftComplex *fft_out, size_t ntime, 
+    cufftReal* bp_sum1, cufftReal* bp_sum2)
+{
+  int i = threadIdx.x + blockIdx.x*blockDim.x; 
+  if (i >= NCHAN*2) return;
+  if (i >= NCHAN) // advance pointer to next polarization
+  {
+    fft_out += ntime*NCHAN;
+    bp_sum1 += NCHAN;
+    bp_sum2 += NCHAN;
+    i -= NCHAN;
+  }
+  float sum1 = 0;
+  float sum2 = 0;
+  for (int j = i; j < ntime*NCHAN; j+= NCHAN)
+  {
+    float pow = fft_out[j].x*fft_out[j].x + fft_out[j].y*fft_out[j].y;
+    fft_out[j].x = pow;
+    sum1 += pow;
+    sum2 += pow*pow;
+  }
+  sum1 *= 1./ntime;
+  sum2 = sqrt(1./(sum2/ntime-sum1*sum1));
+  // add contribution to previous bandpass calculation
+  for (int j = i; j < ntime*NCHAN; j+= NCHAN)
+  {
+    fft_out[j].x = (fft_out[j].x-sum1)*sum2;
+  }
+}
+
 // detect and sum polarizations; do in place
-__global__ void pscrunch(cufftComplex *fft_out, size_t n)
+__global__ void pscrunch (cufftComplex *fft_out, size_t n)
 {
   for (
       int i = threadIdx.x + blockIdx.x*blockDim.x; 
@@ -905,7 +1038,7 @@ __global__ void pscrunch(cufftComplex *fft_out, size_t n)
 }
 
 // average time samples
-__global__ void tscrunch(cufftComplex *fft_out, cufftReal* fft_ave,size_t n)
+__global__ void tscrunch (cufftComplex *fft_out, cufftReal* fft_ave,size_t n)
 {
   for (
       int i = threadIdx.x + blockIdx.x*blockDim.x; 
@@ -931,7 +1064,7 @@ __global__ void tscrunch(cufftComplex *fft_out, cufftReal* fft_ave,size_t n)
 }
 
 // select and digitize
-__global__ void sel_and_dig_2b(
+__global__ void sel_and_dig_2b (
     cufftReal *fft_ave, unsigned char* fft_trim_u, size_t n)
 {
   for (
@@ -962,7 +1095,7 @@ __global__ void sel_and_dig_2b(
 }
 
 // select and digitize
-__global__ void sel_and_dig_4b(
+__global__ void sel_and_dig_4b (
     cufftReal *fft_ave, unsigned char* fft_trim_u, size_t n)
 {
   for (
@@ -994,7 +1127,7 @@ __global__ void sel_and_dig_4b(
 }
 
 // select and digitize
-__global__ void sel_and_dig_8b(
+__global__ void sel_and_dig_8b (
     cufftReal *fft_ave, unsigned char* fft_trim_u, size_t n)
 {
   for (
