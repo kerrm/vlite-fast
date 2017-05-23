@@ -39,9 +39,42 @@ __global__ void multiply_kernel(cufftComplex* dat,cufftComplex* ker, size_t n);
 __global__ void swap_sideband(cufftReal *dat, size_t n);
 __global__ void digitize(float* idat, uint8_t* udat, size_t n);
 
+void usage ()
+{
+  fprintf(stdout,"Usage: process [options]\n"
+	  "-t seconds to simulate (default: 5)"
+	  "-n observations to simulate (default: 1)\n");
+}
 
 int main(int argc, char *argv[])
 {
+  double tobs = 5;
+  int nobs = 1;
+  int arg = 0;
+  while ((arg = getopt(argc, argv, "ht:n:")) != -1) {
+
+    switch (arg) {
+
+    case 'h':
+      usage ();
+      return 0;
+      
+    case 't':
+      if (sscanf (optarg, "%lf", &tobs) != 1) {
+        fprintf (stderr, "genbase: could not obs. time from %s\n", optarg);
+        return -1;
+      }
+      break;
+
+    case 'n':
+      if (sscanf (optarg, "%d", &nobs) != 1) {
+        fprintf (stderr, "writer: could not num obs. from %s\n", optarg);
+        return -1;
+      }
+      break;
+
+    }
+  }
 
   // set up sample counts for given DM
   double dm = 30;
@@ -73,10 +106,16 @@ int main(int argc, char *argv[])
   size_t buflen = VLITE_RATE;
   cufftReal* fdat_dev; cudacheck (
   cudaMalloc ((void**)&fdat_dev, sizeof(cufftReal)*buflen) );
+  //cufftReal* fdat_dev_p1; cudacheck (
+  //cudaMalloc ((void**)&fdat_dev_p1, sizeof(cufftReal)*buflen) );
+  //cufftReal* fdat_dev_pols = {fdat_dev_po, fdat_dev_p1};
 
-  // make a separate buffer to store the overlap
-  cufftReal* fovl_dev; cudacheck (
-  cudaMalloc ((void**)&fovl_dev, sizeof(cufftReal)*n_dm_samp) );
+  // make a separate buffer to store the overlap; need one for each polarization
+  cufftReal* fovl_dev_p0; cudacheck (
+  cudaMalloc ((void**)&fovl_dev_p0, sizeof(cufftReal)*n_dm_samp) );
+  cufftReal* fovl_dev_p1; cudacheck (
+  cudaMalloc ((void**)&fovl_dev_p1, sizeof(cufftReal)*n_dm_samp) );
+  cufftReal* fovl_dev_pols[] = {fovl_dev_p0, fovl_dev_p1};
 
   // allocate memory for DM kernel
   cufftComplex* fker_dev; cudacheck (
@@ -90,12 +129,18 @@ int main(int argc, char *argv[])
   size_t new_samps = buflen - n_dm_samp;
   uint8_t* udat_dev; cudacheck (
   cudaMalloc ((void**)&udat_dev, new_samps) );
+  //uint8_t* udat_dev_p1; cudacheck (
+  //cudaMalloc ((void**)&udat_dev_p1, new_samps) );
+  //uint8_t* udat_dev_pols = {udat_dev_p0, udat_dev_p1};
 
   // allocate host memory; only copy over the unpolluted samples
   // leave room for a ragged edge VDIF frame
   size_t vdif_offset = 0;
-  uint8_t* udat_host; cudacheck (
-  cudaMallocHost ((void**)&udat_host, new_samps + VD_DAT) );
+  uint8_t* udat_host_p0; cudacheck (
+  cudaMallocHost ((void**)&udat_host_p0, new_samps + VD_DAT) );
+  uint8_t* udat_host_p1; cudacheck (
+  cudaMallocHost ((void**)&udat_host_p1, new_samps + VD_DAT) );
+  uint8_t* udat_host_pols[] = {udat_host_p0, udat_host_p1};
 
   // initialize DM kernel; also include correction for FFT normalization
   init_dm_kernel<<<32*nsms,NTHREAD>>> (fker_dev,dm,buflen/2+1);
@@ -109,8 +154,6 @@ int main(int argc, char *argv[])
 
   // set up the FFTs; NB same plan for forward and backward
   cufftHandle plan_fwd,plan_bwd;
-  //cufftcheck (cufftPlan1d (&plan_fwd,buflen,CUFFT_R2C,1));
-  //cufftcheck (cufftPlan1d (&plan_bwd,buflen,CUFFT_C2R,1));
   checkCudaErrors (cufftPlan1d (&plan_fwd,buflen,CUFFT_R2C,1));
   checkCudaErrors (cufftPlan1d (&plan_bwd,buflen,CUFFT_C2R,1));
 
@@ -120,7 +163,6 @@ int main(int argc, char *argv[])
   setVDIFBitsPerSample (hdr, 8);
   setVDIFFrameBytes (hdr, VD_FRM);
   setVDIFNumChannels (hdr,1);
-
 
   // connect to the output buffer
 #if WRITE_DADA
@@ -135,7 +177,8 @@ int main(int argc, char *argv[])
 
   // set time for current set of data; will change after generating apt.
   // no. of seconds
-  for (int nseg=0; nseg < 8; ++nseg) {
+  for (int nseg=0; nseg < nobs; ++nseg) 
+  {
   printf("Working on segment %d.\n",nseg);
 
   // initialize overlap buffer
@@ -144,11 +187,15 @@ int main(int argc, char *argv[])
   size_t current_sample = 0;
   size_t period = size_t(0.2/tsamp); // 200 ms
   printf("Pulse period is %li samples.\n",period);
-  cufftReal* new_start = fdat_dev  + n_dm_samp;
-  curandcheck (curandGenerateNormal( gen, (float*) fovl_dev, n_dm_samp, 0, 1) );
-  set_profile<<<32*nsms, NTHREAD>>> (
-      fovl_dev, current_sample, period, n_dm_samp);
-  cudacheck ( cudaGetLastError() );
+  //cufftReal* new_start_p0 = fdat_dev_p0  + n_dm_samp;
+  //cufftReal* new_start_p1 = fdat_dev_p1  + n_dm_samp;
+  for (int ipol=0; ipol < 2; ++ipol) {
+    curandcheck (curandGenerateNormal (
+        gen, (float*) fovl_dev_pols[ipol], n_dm_samp, 0, 1) );
+    set_profile<<<32*nsms, NTHREAD>>> (
+        fovl_dev_pols[ipol], current_sample, period, n_dm_samp);
+    cudacheck ( cudaGetLastError() );
+  }
   current_sample += n_dm_samp;
 
   // connect to DADA buffer and set current system time for epoch
@@ -157,6 +204,7 @@ int main(int argc, char *argv[])
 
   // write psrdada output header values
   char* ascii_hdr = ipcbuf_get_next_write (hdu->header_block);
+  dadacheck (ascii_header_set (ascii_hdr, "NAME", "%s", "B0833-45" ) );
   dadacheck (ascii_header_set (ascii_hdr, "NCHAN", "%d", 1) );
   dadacheck (ascii_header_set (ascii_hdr, "BANDWIDTH", "%lf", 64) );
   dadacheck (ascii_header_set (ascii_hdr, "CFREQ", "%lf", 352) );
@@ -180,8 +228,7 @@ int main(int argc, char *argv[])
   printf("%s",ascii_hdr);
   ipcbuf_mark_filled (hdu->header_block, 4096);
 
-  // generate up to 120s of data
-  double sec_to_sim = 5.0;
+  double sec_to_sim = tobs;
   size_t end_sample = size_t(sec_to_sim/tsamp);
   size_t current_frame = 0;
   int frame_seconds = 0;
@@ -189,46 +236,55 @@ int main(int argc, char *argv[])
   while (current_sample < end_sample)
   {
     
-    // copy overlap from previous input
-    cudacheck (cudaMemcpy (fdat_dev, fovl_dev, n_dm_samp*sizeof(cufftReal), cudaMemcpyDeviceToDevice) );
+    for (int ipol=0; ipol < 2; ++ipol) {
 
-    // generate input to fill non-overlap region; generate real samps
-    curandcheck (curandGenerateNormal( gen, (float*) new_start, new_samps, 0, 1) );
+      // copy overlap from previous input
+      cudacheck (cudaMemcpy (
+          fdat_dev, fovl_dev_pols[ipol], 
+          n_dm_samp*sizeof(cufftReal), cudaMemcpyDeviceToDevice) );
 
-    // set pulse profile
-    set_profile<<<32*nsms, NTHREAD>>> (
-        new_start, current_sample, period, new_samps);
-    cudacheck ( cudaGetLastError() );
+      // generate input to fill non-overlap region; generate real samps
+      curandcheck (curandGenerateNormal (
+          gen, (float*) fdat_dev+n_dm_samp, new_samps, 0, 1) );
+
+      // set pulse profile
+      set_profile<<<32*nsms, NTHREAD>>> (
+          fdat_dev+n_dm_samp, current_sample, period, new_samps);
+      cudacheck ( cudaGetLastError() );
+
+      // copy input for next overlap to overlap buffer
+      cudacheck (cudaMemcpy (fovl_dev_pols[ipol], fdat_dev+buflen-n_dm_samp, 
+          n_dm_samp*sizeof(cufftReal), cudaMemcpyDeviceToDevice) );
+
+      // forward transform the input
+      cufftcheck (cufftExecR2C (plan_fwd, fdat_dev, ffft_dev) );
+
+      // multiply by DM kernel
+      multiply_kernel <<<32*nsms, NTHREAD>>> (ffft_dev, fker_dev, buflen/2+1);
+      cudacheck ( cudaGetLastError() );
+
+      // inverse transform
+      cufftcheck (cufftExecC2R (plan_bwd, ffft_dev, fdat_dev) );
+
+      // change to same sideband sense as VLITE
+      swap_sideband <<<32*nsms, NTHREAD>>> (fdat_dev, buflen);
+      cudacheck ( cudaGetLastError() );
+
+      // digitize to 8-bit uints; while doing this, select only valid samples
+      digitize <<<32*nsms, NTHREAD>>> (
+          (float*)(fdat_dev+n_dm_samp_lo), udat_dev, new_samps);
+      cudacheck ( cudaGetLastError() );
+
+      // copy to host
+      cudacheck (cudaMemcpy (udat_host_pols[ipol] + vdif_offset, udat_dev, new_samps, cudaMemcpyDeviceToHost) );
+    }
+
     current_sample += new_samps;
-
-    // copy input for next overlap to overlap buffer
-    cudacheck (cudaMemcpy (fovl_dev, fdat_dev+buflen-n_dm_samp, n_dm_samp*sizeof(cufftReal), cudaMemcpyDeviceToDevice) );
-
-    // forward transform the input
-    cufftcheck (cufftExecR2C (plan_fwd, fdat_dev, ffft_dev) );
-
-    // multiply by DM kernel
-    multiply_kernel <<<32*nsms, NTHREAD>>> (ffft_dev, fker_dev, buflen/2+1);
-    cudacheck ( cudaGetLastError() );
-
-    // inverse transform
-    cufftcheck (cufftExecC2R (plan_bwd, ffft_dev, fdat_dev) );
-
-    // change to same sideband sense as VLITE
-    swap_sideband <<<32*nsms, NTHREAD>>> (fdat_dev, buflen);
-    cudacheck ( cudaGetLastError() );
-
-    // digitize to 8-bit uints; while doing this, select only valid samples
-    digitize <<<32*nsms, NTHREAD>>> ((float*)(fdat_dev+n_dm_samp_lo), udat_dev, new_samps);
-    cudacheck ( cudaGetLastError() );
-
-    // copy to host
-    cudacheck (cudaMemcpy (udat_host + vdif_offset, udat_dev, new_samps, cudaMemcpyDeviceToHost) );
 
     // write to psrdada buffer
     size_t nframes = (new_samps + vdif_offset)/VD_DAT;
     //printf("Will write out %d frames.\n",nframes);
-    for (int iframe = 0; iframe < nframes; ++iframe)
+    for (size_t iframe = 0; iframe < nframes; ++iframe)
     {
       // update VDIF header
       if (current_frame == VLITE_FRAME_RATE)
@@ -238,30 +294,32 @@ int main(int argc, char *argv[])
         current_frame = 0;
       }
       setVDIFFrameNumber (hdr, current_frame);
-      for (unsigned ipol = 0; ipol < 2; ++ipol)
+      for (int ipol = 0; ipol < 2; ++ipol)
       {
         setVDIFThreadID(hdr, ipol);
 #if WRITE_DADA
         ipcio_write (hdu->data_block,hdr_buff,32);
-        ipcio_write (hdu->data_block,(char*)(udat_host + VD_DAT*iframe), VD_DAT);
+        ipcio_write (hdu->data_block,(char*)(udat_host_pols[ipol] + VD_DAT*iframe), VD_DAT);
 #else
         fwrite(hdr_buff,1,32,output_fp);
-        fwrite(udat_host+VD_DAT*iframe,1,VD_DAT,output_fp);
+        fwrite(udat_host_pols[ipol]+VD_DAT*iframe,1,VD_DAT,output_fp);
 #endif
       }
       current_frame++;
     }
 
     // copy remainder to beginning of buffer for next time
+    // TODO -- figure this out and what to do RE polarization
     size_t tocopy = new_samps + vdif_offset - nframes*VD_DAT;
     if (tocopy > 0)
     {
-      cudacheck (cudaMemcpy (udat_host, udat_host + nframes*VD_DAT, tocopy, cudaMemcpyHostToHost) );
+      cudacheck (cudaMemcpy (udat_host_p0, udat_host_p0 + nframes*VD_DAT, tocopy, cudaMemcpyHostToHost) );
+      cudacheck (cudaMemcpy (udat_host_p1, udat_host_p1 + nframes*VD_DAT, tocopy, cudaMemcpyHostToHost) );
       vdif_offset = tocopy;
     }
    
   }
-  printf("Advanced the frame second by %d.\n",frame_seconds);
+  //printf("Advanced the frame second by %d.\n",frame_seconds);
 
 #if WRITE_DADA
   dada_hdu_unlock_write (hdu);
@@ -272,11 +330,13 @@ int main(int argc, char *argv[])
 
   // this cleanup a bit trivial at end of program
   cudaFree (fdat_dev);
-  cudaFree (fovl_dev);
+  cudaFree (fovl_dev_p0);
+  cudaFree (fovl_dev_p1);
   cudaFree (fker_dev);
   cudaFree (ffft_dev);
   cudaFree (udat_dev);
-  cudaFreeHost (udat_host);
+  cudaFreeHost (udat_host_p1);
+  cudaFreeHost (udat_host_p0);
 
 }
 
