@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <signal.h>
 #include <string.h>
 #include <time.h>
 
@@ -13,6 +14,8 @@
 #include "def.h"
 #include "vdifio.h"
 
+static FILE* logfile_fp = NULL;
+
 void usage ()
 {
   fprintf(stdout,"Usage: writer [options]\n"
@@ -22,6 +25,10 @@ void usage ()
 	  "-e ethernet device id (default: eth0)\n"
 	  "-o print logging messages to stderr (as well as logfile)\n"
 	  ,(uint64_t)WRITER_SERVICE_PORT,(uint64_t)WRITER_INFO_PORT);
+}
+
+void sigint_handler (int dummy) {
+  fclose (logfile_fp);
 }
 
 void dadacheck (int rcode)
@@ -100,6 +107,9 @@ void print_observation_document(char* result, ObservationDocument* od)
 
 int main(int argc, char** argv)
 {
+  // register SIGINT handling
+  signal (SIGINT, sigint_handler);
+
   int exit_status = EXIT_SUCCESS;
   key_t key = 0x40;
   multilog_t* log = multilog_open ("writer",0);
@@ -194,10 +204,12 @@ int main(int argc, char** argv)
   pid_t pid = getpid();
   snprintf (logfile,128,
       "%s/%s_%s_writer_%06d.log",LOGDIR,hostname,currt_string,pid);
-  FILE *logfile_fp = fopen (logfile, "w");
+  //FILE *logfile_fp = fopen (logfile, "w");
+  logfile_fp = fopen (logfile, "w");
   multilog_add (log, logfile_fp);
   if (stderr_output)
     multilog_add (log, stderr);
+  printf("writing log to %s\n",logfile);
 
 
   dada_hdu_set_key (hdu,key);
@@ -450,7 +462,8 @@ int main(int argc, char** argv)
   shutdown(c.rqst,2);
   multilog (log, LOG_INFO,
       "dada_hdu_disconnect result = %d.\n", dada_hdu_disconnect (hdu));
-  change_file_owner (logfile_fp, "vliteops");
+  fclose (logfile_fp);
+  //change_file_owner (logfile_fp, "vliteops");
 
   return exit_status;
 } // end main
