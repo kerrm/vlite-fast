@@ -34,7 +34,8 @@
 
 
 __global__ void init_dm_kernel(cufftComplex *fker_dev, float dm, size_t n);
-__global__ void set_profile(cufftReal *fdat_dev, size_t current_sample, size_t period, size_t n);
+__global__ void set_profile(cufftReal *fdat_dev, size_t current_sample, 
+    size_t period, size_t n, int ipol=0);
 __global__ void multiply_kernel(cufftComplex* dat,cufftComplex* ker, size_t n);
 __global__ void swap_sideband(cufftReal *dat, size_t n);
 __global__ void digitize(float* idat, uint8_t* udat, size_t n);
@@ -106,9 +107,6 @@ int main(int argc, char *argv[])
   size_t buflen = VLITE_RATE;
   cufftReal* fdat_dev; cudacheck (
   cudaMalloc ((void**)&fdat_dev, sizeof(cufftReal)*buflen) );
-  //cufftReal* fdat_dev_p1; cudacheck (
-  //cudaMalloc ((void**)&fdat_dev_p1, sizeof(cufftReal)*buflen) );
-  //cufftReal* fdat_dev_pols = {fdat_dev_po, fdat_dev_p1};
 
   // make a separate buffer to store the overlap; need one for each polarization
   cufftReal* fovl_dev_p0; cudacheck (
@@ -129,9 +127,6 @@ int main(int argc, char *argv[])
   size_t new_samps = buflen - n_dm_samp;
   uint8_t* udat_dev; cudacheck (
   cudaMalloc ((void**)&udat_dev, new_samps) );
-  //uint8_t* udat_dev_p1; cudacheck (
-  //cudaMalloc ((void**)&udat_dev_p1, new_samps) );
-  //uint8_t* udat_dev_pols = {udat_dev_p0, udat_dev_p1};
 
   // allocate host memory; only copy over the unpolluted samples
   // leave room for a ragged edge VDIF frame
@@ -193,7 +188,7 @@ int main(int argc, char *argv[])
     curandcheck (curandGenerateNormal (
         gen, (float*) fovl_dev_pols[ipol], n_dm_samp, 0, 1) );
     set_profile<<<32*nsms, NTHREAD>>> (
-        fovl_dev_pols[ipol], current_sample, period, n_dm_samp);
+        fovl_dev_pols[ipol], current_sample, period, n_dm_samp, ipol);
     cudacheck ( cudaGetLastError() );
   }
   current_sample += n_dm_samp;
@@ -249,7 +244,7 @@ int main(int argc, char *argv[])
 
       // set pulse profile
       set_profile<<<32*nsms, NTHREAD>>> (
-          fdat_dev+n_dm_samp, current_sample, period, new_samps);
+          fdat_dev+n_dm_samp, current_sample, period, new_samps, ipol);
       cudacheck ( cudaGetLastError() );
 
       // copy input for next overlap to overlap buffer
@@ -329,6 +324,7 @@ int main(int argc, char *argv[])
   }
 
   // this cleanup a bit trivial at end of program
+  curandDestroyGenerator (gen);
   cudaFree (fdat_dev);
   cudaFree (fovl_dev_p0);
   cudaFree (fovl_dev_p1);
@@ -363,8 +359,10 @@ __global__ void init_dm_kernel(cufftComplex *ker, float dm, size_t n)
   }
 }
 
-__global__ void set_profile(cufftReal *dat, size_t current_sample, size_t period, size_t n)
+__global__ void set_profile(cufftReal *dat, size_t current_sample, 
+        size_t period, size_t n, int ipol)
 {
+  float scale = ipol==0?2.0:1.1;
   for (
       int i = threadIdx.x + blockIdx.x*blockDim.x; 
       i < n; 
@@ -388,7 +386,7 @@ __global__ void set_profile(cufftReal *dat, size_t current_sample, size_t period
       //float tmp =1-abs(phase/0.025-1);
       //float amp = 1+tmp*tmp;
       //dat[i] *= amp;
-      dat[i] *= 2;
+      dat[i] *= scale;
     }
   }
 }
