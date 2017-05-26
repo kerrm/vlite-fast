@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <signal.h>
 #include <string.h>
 #include <time.h>
 #include <fcntl.h>
@@ -27,6 +28,13 @@ extern "C" {
 #define DEVICE 0
 #define NTHREAD 512
 //#define PROFILE 1
+#ifdef PROFILE
+#define CUDA_PROFILE_STOP(X,Y,Z) {\
+cudaEventRecord (Y,0);\
+cudaEventSynchronize (Y);\
+cudaEventElapsedTime (Z,X,Y);}
+#endif
+
 
 #define VD_FRM 5032
 #define VD_DAT 5000
@@ -35,6 +43,7 @@ extern "C" {
 #define NFFT 12500 // number of samples to filterbank
 #define NCHAN 6251 //output filterbank channels, including DC
 #define NSCRUNCH 8 // time scrunch factor
+#define SEG_PER_SEC 10 // break each second of data up into chunks
 
 //static volatile int CHANMIN=2411; // minimum output channel (counting DC), from low
 //static volatile int CHANMIN=1; // minimum output channel (counting DC), from low
@@ -44,16 +53,17 @@ extern "C" {
 #define CHANMIN 11 // minimum output channel (counting DC), from low
 #define CHANMAX 6250 // maximum output channel (counting DC), from low
 static volatile int NBIT = 2;
+static FILE* logfile_fp = NULL;
 
 __global__ void convertarray (cufftReal *, unsigned char *, size_t);
-__global__ void normalize (cufftComplex *, size_t);
-__global__ void normalize_running (cufftComplex *, size_t, cufftReal*, cufftReal*);
+__global__ void detect_and_normalize (cufftComplex *, size_t);
+__global__ void detect_and_normalize2 (cufftComplex *, cufftReal*, float, float, size_t);
 __global__ void histogram ( unsigned char *, unsigned int*, size_t);
 __global__ void pscrunch (cufftComplex *, size_t);
 __global__ void tscrunch (cufftComplex *, cufftReal *, size_t);
-__global__ void sel_and_dig_2b (cufftReal*, unsigned char*, size_t);
-__global__ void sel_and_dig_4b (cufftReal*, unsigned char*, size_t);
-__global__ void sel_and_dig_8b (cufftReal*, unsigned char*, size_t);
+__global__ void sel_and_dig_2b (cufftReal*, unsigned char*, size_t, int);
+__global__ void sel_and_dig_4b (cufftReal*, unsigned char*, size_t, int);
+__global__ void sel_and_dig_8b (cufftReal*, unsigned char*, size_t, int);
 
 void usage ()
 {
@@ -66,6 +76,12 @@ void usage ()
 	  "-b reduce output to b bits (2 [def], 4, and 8 are supported))\n"
 	  //"-m retain MUOS band\n"
 	  ,(uint64_t)READER_SERVICE_PORT);
+}
+
+void sigint_handler (int dummy) {
+  fclose (logfile_fp);
+  // TODO other cleanup?
+  exit (EXIT_SUCCESS);
 }
 
 
@@ -108,8 +124,8 @@ int write_psrdada_header (dada_hdu_t* hdu, char* inchdr)
   // initialize observation parameters for filterbank
   // NB the data are upper sideband, so negative channel bandwidth
   double chbw = -64./NCHAN;
-  int nchan = CHANMAX-CHANMIN + 1;
   double tsamp = double(NFFT)/VLITE_RATE*NSCRUNCH*1e6; // NB in mus
+  int nchan = CHANMAX-CHANMIN+1;
   double bw = nchan*chbw;
   double freq0 = 384.;
   double freq = freq0 + 0.5*(CHANMIN+CHANMAX-1)*chbw;
@@ -134,7 +150,7 @@ int write_psrdada_header (dada_hdu_t* hdu, char* inchdr)
   return 0;
 }
 
-int write_sigproc_header (FILE* output_fp, char* inchdr, vdif_header* vdhdr)
+int write_sigproc_header (FILE* output_fp, char* inchdr, vdif_header* vdhdr,int npol)
 {
   // handle values from incoming header; set defaults if not available
   short int station_id = 0;
@@ -148,7 +164,6 @@ int write_sigproc_header (FILE* output_fp, char* inchdr, vdif_header* vdhdr)
   name[OBSERVATION_NAME_SIZE-1] = '\0';
 
   double chbw = -64./NCHAN;
-  int nchan = CHANMAX-CHANMIN + 1;
   double tsamp = double(NFFT)/VLITE_RATE*NSCRUNCH;
   double mjd = getVDIFFrameDMJD (vdhdr, VLITE_FRAME_RATE);
   // write out a sigproc header
@@ -172,11 +187,11 @@ int write_sigproc_header (FILE* output_fp, char* inchdr, vdif_header* vdhdr)
   send_int ("data_type",1,output_fp);
   send_double ("fch1",384+(CHANMIN-0.5)*chbw,output_fp);
   send_double ("foff",chbw,output_fp);//negative foff, fch1 is highest freq
-  send_int ("nchans",nchan,output_fp);
+  send_int ("nchans",CHANMAX-CHANMIN+1,output_fp);
   send_int ("nbits",NBIT,output_fp);
   send_double ("tstart",mjd,output_fp);
   send_double ("tsamp",tsamp,output_fp);//[sec]
-  send_int ("nifs",1,output_fp);
+  send_int ("nifs",npol,output_fp);
   send_string ("HEADER_END",output_fp);
   return 0;
 }
@@ -208,12 +223,16 @@ void get_fbfile (char* fbfile, ssize_t fbfile_len, char* inchdr, vdif_header* vd
 
 int main (int argc, char *argv[])
 {
+  // register SIGINT handling
+  signal (SIGINT, sigint_handler);
+
   int exit_status = EXIT_SUCCESS;
   key_t key_in = 0x40;
   key_t key_out = 0x0;
   uint64_t port = READER_SERVICE_PORT;
   int stderr_output = 0;
   int write_fb = 2;
+  int npol = 2;
 
   int arg = 0;
   while ((arg = getopt(argc, argv, "hk:K:p:omw:b:")) != -1) {
@@ -290,15 +309,18 @@ int main (int argc, char *argv[])
   ts_1ms.tv_nsec = 1000000;
 
   //create and start timing
-#ifdef PROFILE
+  #ifdef PROFILE
   cudaEvent_t start,stop,start_total,stop_total;
   cudaEventCreate (&start);
   cudaEventCreate (&stop);
   cudaEventCreate (&start_total);
   cudaEventCreate (&stop_total);
   cudaEventRecord (start_total,0);
-  float alloc_time=0, hdr_time=0, read_time=0, todev_time=0, convert_time=0, fft_time=0, histo_time=0,normalize_time=0, tscrunch_time=0, pscrunch_time=0, digitize_time=0, write_time=0, flush_time=0, misc_time=0,elapsed=0;
-#endif
+  float alloc_time=0, hdr_time=0, read_time=0, todev_time=0, 
+      convert_time=0, fft_time=0, histo_time=0,normalize_time=0,
+      tscrunch_time=0, pscrunch_time=0, digitize_time=0, write_time=0,
+      flush_time=0, misc_time=0, elapsed=0, total_time=0;
+  #endif
 
   multilog_t* log = multilog_open ("process_baseband",0);
   char logfile[128];
@@ -313,7 +335,8 @@ int main (int argc, char *argv[])
   pid_t pid = getpid();
   snprintf (logfile,128,
       "%s/%s_%s_process_%06d.log",LOGDIR,hostname,currt_string,pid);
-  FILE *logfile_fp = fopen (logfile, "w");
+  //FILE *logfile_fp = fopen (logfile, "w");
+  logfile_fp = fopen (logfile, "w");
   multilog_add (log, logfile_fp);
   if (stderr_output)
     multilog_add (log, stderr);
@@ -339,9 +362,9 @@ int main (int argc, char *argv[])
     }
   }
 
-#ifdef PROFILE
+  #ifdef PROFILE
   cudaEventRecord(start,0);
-#endif
+  #endif
   
   // allocate memory for 1 second; in the future, consider keeping
   // multiple buffers to allow for out-of-order data; this implementation
@@ -350,7 +373,7 @@ int main (int argc, char *argv[])
   cudaMallocHost ((void**)&udat, 2*VLITE_RATE) );
   // device memory for 8-bit samples
   unsigned char* udat_dev; cudacheck (
-  cudaMalloc ((void**)&udat_dev,2*VLITE_RATE/10) );
+  cudaMalloc ((void**)&udat_dev,2*VLITE_RATE/SEG_PER_SEC) );
 
   // device memory for sample histograms
   unsigned int* histo_dev; cudacheck (
@@ -360,7 +383,7 @@ int main (int argc, char *argv[])
 
   // set up memory for FFTs
   // device memory for 32-bit floats
-  int numfft = 2*VLITE_RATE/10/NFFT;
+  int numfft = 2*VLITE_RATE/SEG_PER_SEC/NFFT;
   cufftHandle plan;
   cufftcheck (cufftPlan1d (&plan,NFFT,CUFFT_R2C,numfft));
 
@@ -370,13 +393,14 @@ int main (int argc, char *argv[])
   cufftComplex* fft_out; cudacheck (
   cudaMalloc ((void**)&fft_out,sizeof(cufftComplex)*numfft*NCHAN) );
 
-  // NB, reduce by a further factor of 2 since pols summed in this buffer
-  int scrunch = (numfft*NCHAN)/(2*NSCRUNCH);
+  // NB, reduce by a further factor of 2 if pscrunching
+  int polfac = npol==1?2:1;
+  int scrunch = (numfft*NCHAN)/(polfac*NSCRUNCH);
   cufftReal* fft_ave; cudacheck (
   cudaMalloc ((void**)&fft_ave,sizeof(cufftReal)*scrunch) );
 
   // error check that NBIT is commensurate with trimmed array size
-  int trim = (numfft*(CHANMAX-CHANMIN+1))/(2*NSCRUNCH);
+  int trim = (numfft*(CHANMAX-CHANMIN+1))/(polfac*NSCRUNCH);
   if (trim % (8/NBIT) != 0)
   {
     multilog (log, LOG_ERR,
@@ -391,19 +415,17 @@ int main (int argc, char *argv[])
   unsigned char* fft_trim_u_host; cudacheck (
   cudaMallocHost ((void**)&fft_trim_u_host,trim) );
 
-  /*
   // memory for running bandpass correction; 2 pol * NCHAN
-  cufftReal* bp_sum1; cudacheck (
-  cudaMalloc ((void**)&bp_sum1,sizeof(cufftReal)*NCHAN*2));
-  cufftReal* bp_sum2; cudacheck (
-  cudaMalloc ((void**)&bp_sum1,sizeof(cufftReal)*NCHAN*2));
-  */
+  cufftReal* bp_dev; cudacheck (
+  cudaMalloc ((void**)&bp_dev,sizeof(cufftReal)*(NCHAN+2)*2));
 
-#ifdef PROFILE
-  cudaEventRecord(stop,0);
-  cudaEventSynchronize(stop);
-  cudaEventElapsedTime(&alloc_time,start,stop);
-#endif
+  #ifdef PROFILE
+  CUDA_PROFILE_STOP(start,stop,&alloc_time)
+  #endif
+
+  // constants for bandpass normalization
+  const float bp_wt_const = exp (-0.1/1.0); // 0.1s with tau=1.0s
+  float bp_wt_run = 0;
 
   // allocate a frame buffer on the stack
   char frame_buff[5032];
@@ -431,6 +453,8 @@ int main (int argc, char *argv[])
 
   if (quit)
     break;
+
+  fflush (logfile_fp);
 
   multilog (log, LOG_INFO, "Waiting for DADA header.\n");
   dadacheck (dada_hdu_lock_read (hdu_in) );
@@ -563,9 +587,9 @@ int main (int argc, char *argv[])
   FILE *histo_fp = myopen (histofile, "wb", true);
   multilog (log, LOG_INFO, "Writing histograms to %s.\n",histofile);
 
-#ifdef PROFILE
+  #ifdef PROFILE
   cudaEventRecord(start,0);
-#endif
+  #endif
 
   if (key_out) {
     //Write psrdada output header values
@@ -573,13 +597,11 @@ int main (int argc, char *argv[])
   }
 
   // write out a sigproc header
-  write_sigproc_header (fb_fp, incoming_hdr, vdhdr);
+  write_sigproc_header (fb_fp, incoming_hdr, vdhdr, npol);
 
-#ifdef PROFILE
-  cudaEventRecord (stop,0);
-  cudaEventSynchronize (stop);
-  cudaEventElapsedTime (&hdr_time, start,stop);
-#endif
+  #ifdef PROFILE
+  CUDA_PROFILE_STOP(start,stop,&hdr_time)
+  #endif
 
   bool skipped_data_announced = false;
 
@@ -592,9 +614,9 @@ int main (int argc, char *argv[])
     if (second == current_sec)
     {
 
-#ifdef PROFILE
+      #ifdef PROFILE
       cudaEventRecord (start,0);
-#endif 
+      #endif 
 
       size_t idx = VLITE_RATE*thread + sample*VD_DAT;
       memcpy (udat + idx,dat,VD_DAT);
@@ -616,9 +638,7 @@ int main (int argc, char *argv[])
       ssize_t nread = ipcio_read (hdu_in->data_block,frame_buff,VD_FRM);
 
 #ifdef PROFILE
-      cudaEventRecord (stop,0);
-      cudaEventSynchronize (stop);
-      cudaEventElapsedTime (&elapsed,start,stop);
+      CUDA_PROFILE_STOP(start,stop,&elapsed)
       read_time += elapsed;
 #endif
 
@@ -667,6 +687,8 @@ int main (int argc, char *argv[])
       // loop to exit program
       break;
     }
+    // keep log on disk up to date
+    fflush (logfile_fp);
 
     // check that both buffers are full
     skipped_data_announced = false;
@@ -689,133 +711,122 @@ int main (int argc, char *argv[])
     }
 
     // do dispatch -- break into 0.1s chunks to fit in GPU memory
-    size_t nchunk = numfft*NFFT; // samples in a chunk, 2*VLITE_RATE/10
-    for (int i = 0; i < 10; ++i)
+    size_t nchunk = numfft*NFFT; // samples in a chunk, 2*VLITE_RATE/SEG_PER_SEC
+    for (int iseg = 0; iseg < SEG_PER_SEC; iseg++)
     {
 
-#ifdef PROFILE
+      #ifdef PROFILE
       cudaEventRecord(start,0);
-#endif 
+      #endif 
       // need to copy pols separately
       for (int ipol=0; ipol < 2; ++ipol)
       {
         unsigned char* dst = udat_dev + ipol*nchunk/2;
-        unsigned char* src = udat + i*nchunk/2;
+        unsigned char* src = udat + ipol*VLITE_RATE + iseg*nchunk/2;
         cudacheck (cudaMemcpy (dst,src,nchunk/2,cudaMemcpyHostToDevice) );
       }
-#ifdef PROFILE
-      cudaEventRecord(stop,0);
-      cudaEventSynchronize(stop);
-      cudaEventElapsedTime(&elapsed,start,stop);
+      #ifdef PROFILE
+      CUDA_PROFILE_STOP(start,stop,&elapsed)
       todev_time += elapsed;
-#endif
+      #endif
 
-#ifdef PROFILE
-      cudaEventRecord(start,0);
-#endif 
+      #ifdef PROFILE
+      cudaEventRecord (start,0);
+      #endif 
       // compute sample histogram
       // memset implicitly barriers between blocks, necessary
       cudacheck (cudaMemset (histo_dev,0,2*256*sizeof(unsigned int)));
-      histogram<<<nsms*32,512>>> (udat_dev,histo_dev,nchunk);
-      cudacheck (cudaGetLastError() );
-#ifdef PROFILE
-      cudaEventRecord(stop,0);
-      cudaEventSynchronize(stop);
-      cudaEventElapsedTime(&elapsed,start,stop);
+      histogram <<<nsms*32,512>>> (udat_dev,histo_dev,nchunk);
+      cudacheck (cudaGetLastError () );
+      #ifdef PROFILE
+      CUDA_PROFILE_STOP(start,stop,&elapsed)
       histo_time += elapsed;
-#endif
+      #endif
 
-#ifdef PROFILE
-      cudaEventRecord(start,0);
-#endif 
-      convertarray<<<nsms*32,NTHREAD>>> (fft_in,udat_dev,nchunk);
-      cudacheck (cudaGetLastError() );
-#ifdef PROFILE
-      cudaEventRecord(stop,0);
-      cudaEventSynchronize(stop);
-      cudaEventElapsedTime(&elapsed,start,stop);
+      #ifdef PROFILE
+      cudaEventRecord (start,0);
+      #endif 
+      convertarray <<<nsms*32,NTHREAD>>> (fft_in,udat_dev,nchunk);
+      cudacheck (cudaGetLastError () );
+      #ifdef PROFILE
+      CUDA_PROFILE_STOP(start,stop,&elapsed)
       convert_time += elapsed;
-#endif
+      #endif
 
-#ifdef PROFILE
-      cudaEventRecord(start,0);
-#endif 
+      #ifdef PROFILE
+      cudaEventRecord (start,0);
+      #endif 
       cufftcheck (cufftExecR2C (plan,fft_in,fft_out) );
-#ifdef PROFILE
-      cudaEventRecord(stop,0);
-      cudaEventSynchronize(stop);
-      cudaEventElapsedTime(&elapsed,start,stop);
+      #ifdef PROFILE
+      CUDA_PROFILE_STOP(start,stop,&elapsed)
       fft_time += elapsed;
-#endif
+      #endif
 
-#ifdef PROFILE
+      #ifdef PROFILE
       cudaEventRecord(start,0);
-#endif 
-      normalize<<<(NCHAN*2)/NTHREAD+1,NTHREAD>>> (fft_out,numfft/2);
-      cudacheck ( cudaGetLastError() );
-#ifdef PROFILE
-      cudaEventRecord(stop,0);
-      cudaEventSynchronize(stop);
-      cudaEventElapsedTime(&elapsed,start,stop);
+      #endif 
+      //detect_and_normalize <<<(NCHAN*2)/NTHREAD+1,NTHREAD>>> (fft_out,numfft/2);
+      detect_and_normalize2 <<<(NCHAN*2)/NTHREAD+1,NTHREAD>>> (fft_out,bp_dev,bp_wt_const,bp_wt_run,numfft/2);
+      cudacheck ( cudaGetLastError () );
+      #ifdef PROFILE
+      CUDA_PROFILE_STOP(start,stop,&elapsed)
       normalize_time += elapsed;
-#endif
+      #endif
+      // update bandpass normalization
+      bp_wt_run = 1+bp_wt_const*bp_wt_run;
 
-#ifdef PROFILE
-      cudaEventRecord(start,0);
-#endif 
-      size_t maxn = (numfft*NCHAN)/2; // reduce by 2 for polarization
-      pscrunch<<<nsms*32,NTHREAD>>> (fft_out,maxn);
-      cudacheck ( cudaGetLastError() );
-#ifdef PROFILE
-      cudaEventRecord(stop,0);
-      cudaEventSynchronize(stop);
-      cudaEventElapsedTime(&elapsed,start,stop);
+      #ifdef PROFILE
+      cudaEventRecord (start,0);
+      #endif 
+      size_t maxn = (numfft*NCHAN)/polfac;
+      if (npol==1) {
+        pscrunch <<<nsms*32,NTHREAD>>> (fft_out,maxn);
+        cudacheck ( cudaGetLastError () );
+      }
+      #ifdef PROFILE
+      CUDA_PROFILE_STOP(start,stop,&elapsed)
       pscrunch_time += elapsed;
-#endif
+      #endif
 
-#ifdef PROFILE
-      cudaEventRecord(start,0);
-#endif 
+      #ifdef PROFILE
+      cudaEventRecord( start,0);
+      #endif 
       maxn /= NSCRUNCH;
-      tscrunch<<<nsms*32,NTHREAD>>> (fft_out,fft_ave,maxn);
-      cudacheck ( cudaGetLastError() );
-#ifdef PROFILE
-      cudaEventRecord(stop,0);
-      cudaEventSynchronize(stop);
-      cudaEventElapsedTime(&elapsed,start,stop);
+      tscrunch <<<nsms*32,NTHREAD>>> (fft_out,fft_ave,maxn);
+      cudacheck ( cudaGetLastError () );
+      #ifdef PROFILE
+      CUDA_PROFILE_STOP(start,stop,&elapsed)
       tscrunch_time += elapsed;
-#endif
+      #endif
 
-#ifdef PROFILE
-      cudaEventRecord(start,0);
-#endif 
+      #ifdef PROFILE
+      cudaEventRecord (start,0);
+      #endif 
       maxn = (CHANMAX-CHANMIN+1)*(maxn/NCHAN)/(8/NBIT);
       switch (NBIT)
       {
         case 2:
-          sel_and_dig_2b<<<nsms*32,NTHREAD>>> (fft_ave,fft_trim_u,maxn);
+          sel_and_dig_2b <<<nsms*32,NTHREAD>>> (fft_ave,fft_trim_u,maxn, npol);
           break;
         case 4:
-          sel_and_dig_4b<<<nsms*32,NTHREAD>>> (fft_ave,fft_trim_u,maxn);
+          sel_and_dig_4b <<<nsms*32,NTHREAD>>> (fft_ave,fft_trim_u,maxn, npol);
           break;
         case 8:
-          sel_and_dig_8b<<<nsms*32,NTHREAD>>> (fft_ave,fft_trim_u,maxn);
+          sel_and_dig_8b <<<nsms*32,NTHREAD>>> (fft_ave,fft_trim_u,maxn, npol);
           break;
         default:
-          sel_and_dig_2b<<<nsms*32,NTHREAD>>> (fft_ave,fft_trim_u,maxn);
+          sel_and_dig_2b <<<nsms*32,NTHREAD>>> (fft_ave,fft_trim_u,maxn, npol);
           break;
       }
-      cudacheck ( cudaGetLastError() );
-#ifdef PROFILE
-      cudaEventRecord(stop,0);
-      cudaEventSynchronize(stop);
-      cudaEventElapsedTime(&elapsed,start,stop);
+      cudacheck ( cudaGetLastError () );
+      #ifdef PROFILE
+      CUDA_PROFILE_STOP(start,stop,&elapsed)
       digitize_time += elapsed;
-#endif
+      #endif
 
-#ifdef PROFILE
-      cudaEventRecord(start,0);
-#endif 
+      #ifdef PROFILE
+      cudaEventRecord (start,0);
+      #endif 
 
       // copy filterbanked data back to host
       cudacheck (cudaMemcpy (
@@ -824,37 +835,33 @@ int main (int argc, char *argv[])
       cudacheck (cudaMemcpy (
             histo_hst,histo_dev,2*256*sizeof(unsigned int),cudaMemcpyDeviceToHost) );
 
-#ifdef PROFILE
-      cudaEventRecord(stop,0);
-      cudaEventSynchronize(stop);
-      cudaEventElapsedTime(&elapsed,start,stop);
+      #ifdef PROFILE
+      CUDA_PROFILE_STOP(start,stop,&elapsed)
       misc_time += elapsed;
-#endif
+      #endif
 
       // finally, push the filterbanked time samples onto psrdada buffer
       // and/or write out to sigproc
 
-#ifdef PROFILE
-      cudaEventRecord(start,0);
-#endif 
+      #ifdef PROFILE
+      cudaEventRecord (start,0);
+      #endif 
       if (key_out)
         ipcio_write (hdu_out->data_block,(char *)fft_trim_u_host,maxn);
       fwrite (fft_trim_u_host,1,maxn,fb_fp);
       fb_bytes_written += maxn;
       fwrite (histo_hst,sizeof(unsigned int),512,histo_fp);
-#ifdef PROFILE
-      cudaEventRecord(stop,0);
-      cudaEventSynchronize(stop);
-      cudaEventElapsedTime(&elapsed,start,stop);
+      #ifdef PROFILE
+      CUDA_PROFILE_STOP(start,stop,&elapsed)
       write_time += elapsed;
-#endif
+      #endif
 
     }
-  }
+  } // end loop over packets
 
-#ifdef PROFILE
+  #ifdef PROFILE
   cudaEventRecord(start,0);
-#endif 
+  #endif 
 
   dadacheck (dada_hdu_unlock_read (hdu_in));
   if (key_out)
@@ -872,16 +879,13 @@ int main (int argc, char *argv[])
   }
   */
 
-#ifdef PROFILE
-  cudaEventRecord(stop,0);
-  cudaEventSynchronize(stop);
-  cudaEventElapsedTime(&flush_time,start,stop);
-
-  cudaEventRecord(stop_total,0);
-  cudaEventSynchronize(stop_total);
-  float total_time;
-  cudaEventElapsedTime(&total_time,start_total,stop_total);
-  float sub_time = alloc_time + hdr_time + read_time + todev_time + convert_time + fft_time + histo_time + normalize_time + pscrunch_time + tscrunch_time + digitize_time + write_time + flush_time + misc_time;
+  #ifdef PROFILE
+  CUDA_PROFILE_STOP(start,stop,&flush_time)
+  CUDA_PROFILE_STOP(start_total,stop_total,&total_time)
+  float sub_time = alloc_time + hdr_time + read_time + todev_time + 
+      convert_time + fft_time + histo_time + normalize_time +
+      pscrunch_time + tscrunch_time + digitize_time + write_time + 
+      flush_time + misc_time;
   multilog (log, LOG_INFO, "Alloc Time..%.3f\n", alloc_time*1e-3);
   multilog (log, LOG_INFO, "Read Time...%.3f\n", read_time*1e-3);
   multilog (log, LOG_INFO, "Copy To Dev.%.3f\n", todev_time*1e-3);
@@ -897,7 +901,7 @@ int main (int argc, char *argv[])
   multilog (log, LOG_INFO, "Misc........%.3f\n", misc_time*1e-3);
   multilog (log, LOG_INFO, "Sum of subs.%.3f\n", sub_time*1e-3);
   multilog (log, LOG_INFO, "Total run...%.3f\n", total_time*1e-3);
-#endif
+  #endif
 
   } // end loop over observations
 
@@ -923,6 +927,13 @@ int main (int argc, char *argv[])
   cudaFreeHost (fft_trim_u_host);
   cudaFree (histo_dev);
   cudaFreeHost (histo_dev);
+
+  #ifdef PROFILE
+  cudaEventDestroy (start);
+  cudaEventDestroy (stop);
+  cudaEventDestroy (start_total);
+  cudaEventDestroy (stop_total);
+  #endif
 
   return exit_status;
     
@@ -962,7 +973,9 @@ __global__ void histogram ( unsigned char *utime, unsigned int* histo, size_t n)
 // detect total power and normalize the polarizations in place
 // use a monolithic kernel pattern here since the total number of threads
 // should be relatively small
-__global__ void normalize (cufftComplex *fft_out, size_t ntime)
+// TODO -- this will probably be more efficient if done using lots of 
+// threads and syncing; however, it doesn't seem to be a bottleneck
+__global__ void detect_and_normalize (cufftComplex *fft_out, size_t ntime)
 {
   int i = threadIdx.x + blockIdx.x*blockDim.x; 
   if (i >= NCHAN*2) return;
@@ -987,41 +1000,40 @@ __global__ void normalize (cufftComplex *fft_out, size_t ntime)
     fft_out[j].x = (fft_out[j].x-sum1)*sum2;
   }
 }
-
-// detect total power and normalize the polarizations in place
-// use a monolithic kernel pattern here since the total number of threads
-// should be relatively small
-__global__ void normalize_running (cufftComplex *fft_out, size_t ntime, 
-    cufftReal* bp_sum1, cufftReal* bp_sum2)
+__global__ void detect_and_normalize2 (cufftComplex *fft_out, cufftReal* bp, 
+        float scale, float norm, size_t ntime)
 {
   int i = threadIdx.x + blockIdx.x*blockDim.x; 
   if (i >= NCHAN*2) return;
   if (i >= NCHAN) // advance pointer to next polarization
   {
     fft_out += ntime*NCHAN;
-    bp_sum1 += NCHAN;
-    bp_sum2 += NCHAN;
+    bp += NCHAN;
     i -= NCHAN;
   }
   float sum1 = 0;
-  float sum2 = 0;
   for (int j = i; j < ntime*NCHAN; j+= NCHAN)
   {
     float pow = fft_out[j].x*fft_out[j].x + fft_out[j].y*fft_out[j].y;
     fft_out[j].x = pow;
     sum1 += pow;
-    sum2 += pow*pow;
   }
-  sum1 *= 1./ntime;
-  sum2 = sqrt(1./(sum2/ntime-sum1*sum1));
-  // add contribution to previous bandpass calculation
+  // dividing by 2N would give chi^2 distribution, with variance of 4; therefore, scale by an
+  // additional power of 2 and powers will have unit variance
+  sum1 = ntime / sum1;
+
+  if (norm==0.) // first data; initialize bandpass
+    bp[i] = sum1;
+  else
+    bp[i] = (sum1 + scale*norm*bp[i]) / (1 + scale*norm);
   for (int j = i; j < ntime*NCHAN; j+= NCHAN)
   {
-    fft_out[j].x = (fft_out[j].x-sum1)*sum2;
+    //fft_out[j].x = fft_out[j].x*sum1-1;
+    fft_out[j].x = fft_out[j].x*bp[i]-1;
   }
 }
 
-// detect and sum polarizations; do in place
+// sum polarizations in place
 __global__ void pscrunch (cufftComplex *fft_out, size_t n)
 {
   for (
@@ -1029,23 +1041,24 @@ __global__ void pscrunch (cufftComplex *fft_out, size_t n)
       i < n; 
       i += blockDim.x*gridDim.x)
   {
-    //cufftComplex pol1 = fft_out[i];
-    //cufftComplex pol2 = fft_out[i+n];
-    //fft_out[i].x = pol1.x*pol1.x + pol1.y*pol1.y + 
-    //               pol2.x*pol2.x + pol2.y*pol2.y;
-    fft_out[i].x += fft_out[i+n].x;
+    //fft_out[i].x += fft_out[i+n].x;
+    fft_out[i].x = M_SQRT1_2*(fft_out[i].x + fft_out[i+n].x);
   }
 }
 
 // average time samples
+// TODO -- review normalization and make sure it's correct with polarization
 __global__ void tscrunch (cufftComplex *fft_out, cufftReal* fft_ave,size_t n)
 {
+  // loop over the output indices; calculate corresponding input index,
+  // then add up the subsequent NSCRUNCH samples
+  float scale = sqrt (1./NSCRUNCH);
   for (
       int i = threadIdx.x + blockIdx.x*blockDim.x; 
       i < n; 
       i += blockDim.x*gridDim.x)
   {
-    // explicit calculation of indices for future references
+    // explicit calculation of indices for future reference
     //int out_time_idx = i/NCHAN;
     //int out_chan_idx = i - out_time_idx*NCHAN;
     //int src_idx = out_time_idx * NSCRUNCH* NCHAN + out_chan_idx;
@@ -1056,32 +1069,35 @@ __global__ void tscrunch (cufftComplex *fft_out, cufftReal* fft_ave,size_t n)
     {
       fft_ave[i] += fft_out[src_idx].x;
     }
-    // additional factor of 2 here corrects for polarization sum
-    // TODO precompute this or is compiler smart enough?
-    // and added an extra factor of 2 to get output std. correct
-    fft_ave[i] *= sqrt(0.25/NSCRUNCH);
+    fft_ave[i] *= scale;
   }
 }
 
 // select and digitize
 __global__ void sel_and_dig_2b (
-    cufftReal *fft_ave, unsigned char* fft_trim_u, size_t n)
+    cufftReal *fft_ave, unsigned char* fft_trim_u, size_t n, int npol)
 {
+  int NCHANOUT = CHANMAX-CHANMIN+1;
+  //int NTIME = (n*4) / (NCHANOUT*npol); // total time samples
+  int NTIME = (VLITE_RATE/SEG_PER_SEC/NFFT)/NSCRUNCH;
   for (
       int i = threadIdx.x + blockIdx.x*blockDim.x; 
       i < n; 
       i += blockDim.x*gridDim.x)
   {
     // compute index into input array
-    int nchan = CHANMAX-CHANMIN+1;
-    // correct for packing of 4
-    int time_idx = (i*4)/(nchan);
-    int chan_idx = i*4 - time_idx*nchan;
+    // correct for packing of 4 (because i indexes a *byte*, not a sample)
+    //int time_idx = (i*4)/(NCHANOUT);
+    //int chan_idx = i*4 - time_idx*NCHANOUT;
+    int time_idx = (i*4)/(NCHANOUT*npol);
+    int pol_idx = (i*4 - time_idx*NCHANOUT*npol)/NCHANOUT;
+    int chan_idx = i*4 - time_idx*npol*NCHANOUT - pol_idx*NCHANOUT;
     fft_trim_u[i] = 0;
     for (int j = 0; j < 4; ++j)
     {
       // from Table 3 of Jenet & Anderson 1998
-      float tmp = fft_ave[time_idx*NCHAN+chan_idx+CHANMIN+j]/0.9674 + 1.5;
+      //float tmp = fft_ave[time_idx*NCHAN+chan_idx+CHANMIN+j]/0.9674 + 1.5;
+      float tmp = fft_ave[pol_idx*NTIME*NCHAN + time_idx*NCHAN+chan_idx+CHANMIN+j]/0.9675 + 1.5;
       if (tmp < 1) // do nothing, bit already correctly set
         continue;
       if (tmp < 2)
@@ -1096,27 +1112,34 @@ __global__ void sel_and_dig_2b (
 
 // select and digitize
 __global__ void sel_and_dig_4b (
-    cufftReal *fft_ave, unsigned char* fft_trim_u, size_t n)
+    cufftReal *fft_ave, unsigned char* fft_trim_u, size_t n, int npol)
 {
+  int NCHANOUT = CHANMAX-CHANMIN+1;
+  //int NTIME = n / (NCHANOUT*npol); // total time samples
+  int NTIME = (VLITE_RATE/SEG_PER_SEC/NFFT)/NSCRUNCH;
   for (
       int i = threadIdx.x + blockIdx.x*blockDim.x; 
       i < n; 
       i += blockDim.x*gridDim.x)
   {
     // compute index into input array
-    int nchan = CHANMAX-CHANMIN+1;
-    // correct for packing of 2
-    int time_idx = (i*2)/(nchan);
-    int chan_idx = i*2 - time_idx*nchan;
+    // correct for packing of 2 (because i indexes a *byte*, not a sample)
+    //int time_idx = (i*2)/(NCHANOUT);
+    //int chan_idx = i*2 - time_idx*NCHANOUT;
+    int time_idx = (i*2)/(NCHANOUT*npol);
+    int pol_idx = (i*2 - time_idx*NCHANOUT*npol)/NCHANOUT;
+    int chan_idx = i*2 - time_idx*npol*NCHANOUT - pol_idx*NCHANOUT;
     // from Table 3 of Jenet & Anderson 1998
-    float tmp = fft_ave[time_idx*NCHAN+chan_idx+CHANMIN]/0.3188 + 7.5;
+    //float tmp = fft_ave[time_idx*NCHAN+chan_idx+CHANMIN]/0.3188 + 7.5;
+    float tmp = fft_ave[pol_idx*NTIME*NCHAN + time_idx*NCHAN+chan_idx+CHANMIN]/0.3188 + 7.5;
     if (tmp <= 0)
       fft_trim_u[i] = 0;
     else if (tmp >= 15)
       fft_trim_u[i] = 15;
     else
       fft_trim_u[i] = (unsigned char)(tmp);
-    tmp = fft_ave[time_idx*NCHAN+chan_idx+CHANMIN+1]/0.3188 + 7.5;
+    //tmp = fft_ave[time_idx*NCHAN+chan_idx+CHANMIN+1]/0.3188 + 7.5;
+    tmp = fft_ave[pol_idx*NTIME*NCHAN + time_idx*NCHAN+chan_idx+CHANMIN+1]/0.3188 + 7.5;
     if (tmp <= 0)
       ;
     else if (tmp >= 15)
@@ -1128,19 +1151,22 @@ __global__ void sel_and_dig_4b (
 
 // select and digitize
 __global__ void sel_and_dig_8b (
-    cufftReal *fft_ave, unsigned char* fft_trim_u, size_t n)
+    cufftReal *fft_ave, unsigned char* fft_trim_u, size_t n, int npol)
 {
+  int NCHANOUT = CHANMAX-CHANMIN+1;
+  //int NTIME = n / (NCHANOUT*npol); // total time samples
+  int NTIME = (VLITE_RATE/SEG_PER_SEC/NFFT)/NSCRUNCH;
   for (
       int i = threadIdx.x + blockIdx.x*blockDim.x; 
       i < n; 
       i += blockDim.x*gridDim.x)
   {
     // compute index into input array
-    int nchan = CHANMAX-CHANMIN+1;
-    int time_idx = i/(nchan);
-    int chan_idx = i - time_idx*nchan;
+    int time_idx = i/(NCHANOUT*npol);
+    int pol_idx = (i - time_idx*NCHANOUT*npol)/NCHANOUT;
+    int chan_idx = i - time_idx*npol*NCHANOUT - pol_idx*NCHANOUT;
     // from Table 3 of Jenet & Anderson 1998
-    float tmp = fft_ave[time_idx*NCHAN+chan_idx+CHANMIN]/0.02957 + 127.5;
+    float tmp = fft_ave[pol_idx*NTIME*NCHAN + time_idx*NCHAN+chan_idx+CHANMIN]/0.02957 + 127.5;
     if (tmp <= 0)
       fft_trim_u[i] = 0;
     else if (tmp >= 255)
