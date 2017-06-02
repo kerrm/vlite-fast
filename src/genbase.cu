@@ -21,6 +21,7 @@
 #include "multilog.h"
 
 #include "util.h"
+#include "cuda_util.h"
 
 #define DEVICE 1        //GPU. on furby: 0 = TITAN Black, 1 = GTX 780
 #define NTHREAD 512
@@ -35,24 +36,31 @@
 
 __global__ void init_dm_kernel(cufftComplex *fker_dev, float dm, size_t n);
 __global__ void set_profile(cufftReal *fdat_dev, size_t current_sample, 
-    size_t period, size_t n, int ipol=0);
+    size_t period, float ampl, size_t n);
 __global__ void multiply_kernel(cufftComplex* dat,cufftComplex* ker, size_t n);
 __global__ void swap_sideband(cufftReal *dat, size_t n);
 __global__ void digitize(float* idat, uint8_t* udat, size_t n);
 
 void usage ()
 {
-  fprintf(stdout,"Usage: process [options]\n"
+  fprintf(stdout,"Usage: genbase [options]\n"
 	  "-t seconds to simulate (default: 5)"
+	  "-p pulse period [s; default 0.5]"
+	  "-a amplitude as fraction of Tsys [default 0.05]"
+	  "-s scale of second polarization relative to first [default 1.0]"
+	  "-d dm [default=30; NB this is about the largest feasible]"
 	  "-n observations to simulate (default: 1)\n");
 }
 
 int main(int argc, char *argv[])
 {
   double tobs = 5;
+  double dm = 30;
+  double pulse_period = 0.5;
+  float ampls[2] = {1.05,1.05};
   int nobs = 1;
   int arg = 0;
-  while ((arg = getopt(argc, argv, "ht:n:")) != -1) {
+  while ((arg = getopt(argc, argv, "ht:n:p:a:s:d:")) != -1) {
 
     switch (arg) {
 
@@ -62,23 +70,49 @@ int main(int argc, char *argv[])
       
     case 't':
       if (sscanf (optarg, "%lf", &tobs) != 1) {
-        fprintf (stderr, "genbase: could not obs. time from %s\n", optarg);
+        fprintf (stderr, "genbase: could not read obs. time from %s\n", optarg);
         return -1;
       }
       break;
 
     case 'n':
       if (sscanf (optarg, "%d", &nobs) != 1) {
-        fprintf (stderr, "writer: could not num obs. from %s\n", optarg);
+        fprintf (stderr, "writer: could not read num obs. from %s\n", optarg);
         return -1;
       }
       break;
+
+    case 'a':
+      if (sscanf (optarg, "%f", ampls) != 1) {
+        fprintf (stderr, "genbase: could not read ampl.from %s\n", optarg);
+        return -1;
+      }
+
+    case 's':
+      float scale;
+      if (sscanf (optarg, "%f", &scale) != 1) {
+        fprintf (stderr, "genbase: could not read scale from %s\n", optarg);
+        return -1;
+      }
+      ampls[1] = ampls[0]*scale;
+      break;
+
+    case 'd':
+      if (sscanf (optarg, "%lf", &dm) != 1) {
+        fprintf (stderr, "genbase: could not read DM from %s\n", optarg);
+        return -1;
+      }
+
+    case 'p':
+      if (sscanf (optarg, "%lf", &pulse_period) != 1) {
+        fprintf (stderr, "genbase: could not read period from %s\n", optarg);
+        return -1;
+      }
 
     }
   }
 
   // set up sample counts for given DM
-  double dm = 30;
   double freq = 352;
   double freq_hi = 384;
   double freq_lo = 320;
@@ -86,12 +120,12 @@ int main(int argc, char *argv[])
   printf("Sampling time is %g.\n",tsamp);
   double t_dm_lo = dm/2.41e-10*(1./(freq_lo*freq_lo)-1./(freq*freq)); // mus
   double t_dm_hi = dm/2.41e-10*(1./(freq*freq)-1./(freq_hi*freq_hi)); // mus
-  printf("DM smearing time to bottom of band is %f.\n",t_dm_lo);
-  printf("DM smearing time to top of band is %f.\n",t_dm_hi);
+  printf ("DM smearing time to bottom of band is %2f.\n",t_dm_lo);
+  printf ("DM smearing time to top of band is %.2f.\n",t_dm_hi);
   unsigned long n_dm_samp_lo = (unsigned long) t_dm_lo*1e-6/tsamp;
   unsigned long n_dm_samp_hi = (unsigned long) t_dm_hi*1e-6/tsamp;
-  printf("DM smearing samples to bottom of band is %li.\n",n_dm_samp_lo);
-  printf("DM smearing samples to top of band is %li.\n",n_dm_samp_hi);
+  printf ("DM smearing samples to bottom of band is %li.\n",n_dm_samp_lo);
+  printf ("DM smearing samples to top of band is %li.\n",n_dm_samp_hi);
   n_dm_samp_lo += (n_dm_samp_lo & 1); // make it even
   n_dm_samp_hi += (n_dm_samp_hi & 1); // make it even
   unsigned long n_dm_samp = n_dm_samp_lo + n_dm_samp_hi;
@@ -170,6 +204,11 @@ int main(int argc, char *argv[])
   FILE *output_fp = myopen("/data/VLITE/kerrm/baseband_sim.uw","wb");
 #endif
 
+  // pulse properties
+  size_t period = size_t(pulse_period/tsamp);
+  printf ("Pulse period is %li samples.\n",period);
+
+
   // set time for current set of data; will change after generating apt.
   // no. of seconds
   for (int nseg=0; nseg < nobs; ++nseg) 
@@ -177,18 +216,18 @@ int main(int argc, char *argv[])
   printf("Working on segment %d.\n",nseg);
 
   // initialize overlap buffer
-  printf("Setting up a buffer of %li with an overlap of %li.\n",buflen,n_dm_samp);
-  printf("Will lose %0.2f to edge effects.\n",double(n_dm_samp)/buflen);
+  printf ("Setting up a buffer of %li with an overlap of %li.\n",buflen,n_dm_samp);
+  printf ("Will lose %0.2f to edge effects.\n",double(n_dm_samp)/buflen);
+  fflush (stdout) ;
   size_t current_sample = 0;
-  size_t period = size_t(0.2/tsamp); // 200 ms
-  printf("Pulse period is %li samples.\n",period);
+
   //cufftReal* new_start_p0 = fdat_dev_p0  + n_dm_samp;
   //cufftReal* new_start_p1 = fdat_dev_p1  + n_dm_samp;
   for (int ipol=0; ipol < 2; ++ipol) {
     curandcheck (curandGenerateNormal (
         gen, (float*) fovl_dev_pols[ipol], n_dm_samp, 0, 1) );
     set_profile<<<32*nsms, NTHREAD>>> (
-        fovl_dev_pols[ipol], current_sample, period, n_dm_samp, ipol);
+        fovl_dev_pols[ipol], current_sample, period, 1+ampls[ipol], n_dm_samp);
     cudacheck ( cudaGetLastError() );
   }
   current_sample += n_dm_samp;
@@ -244,7 +283,7 @@ int main(int argc, char *argv[])
 
       // set pulse profile
       set_profile<<<32*nsms, NTHREAD>>> (
-          fdat_dev+n_dm_samp, current_sample, period, new_samps, ipol);
+          fdat_dev+n_dm_samp, current_sample, period, 1.+ampls[ipol], new_samps);
       cudacheck ( cudaGetLastError() );
 
       // copy input for next overlap to overlap buffer
@@ -360,9 +399,8 @@ __global__ void init_dm_kernel(cufftComplex *ker, float dm, size_t n)
 }
 
 __global__ void set_profile(cufftReal *dat, size_t current_sample, 
-        size_t period, size_t n, int ipol)
+        size_t period, float ampl, size_t n)
 {
-  float scale = ipol==0?2.0:1.1;
   for (
       int i = threadIdx.x + blockIdx.x*blockDim.x; 
       i < n; 
@@ -386,7 +424,7 @@ __global__ void set_profile(cufftReal *dat, size_t current_sample,
       //float tmp =1-abs(phase/0.025-1);
       //float amp = 1+tmp*tmp;
       //dat[i] *= amp;
-      dat[i] *= scale;
+      dat[i] *= ampl;
     }
   }
 }
