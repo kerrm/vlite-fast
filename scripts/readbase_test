@@ -1,0 +1,13 @@
+#!/bin/bash
+# set up a single process_baseband instance and connect it to
+# genbase with psrdada; this will work if run as vliteops on any vlite-difx node
+# start up psrdada buffer
+sudo killall process_baseband
+sudo killall genbase
+sudo /home/vlite-master/mtk/bin/dada_db -k 40 -d
+sudo /home/vlite-master/mtk/bin/dada_db -k 40 -l -b 257638400 -n 8
+sleep 0.5
+/home/vlite-master/mtk/src/readbase /home/vlite-master/mtk/data/20150302_151845_B0329+54_ev_0005.out.uw &
+sleep 0.5
+/home/vlite-master/mtk/src/process_baseband -p 0 -k 40 -K 0 -w 1 -b 2 -P 1 -o
+sudo /home/vlite-master/mtk/bin/dada_db -k 40 -d
