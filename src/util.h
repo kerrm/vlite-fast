@@ -1,11 +1,6 @@
-#include <cufft.h>
-#include <curand.h>
 #include <unistd.h>
 #include <stdio.h>
 
-void cudacheck (cudaError_t err);
-void cufftcheck (cufftResult err);
-void curandcheck (curandStatus_t err);
 void dadacheck (int rcode);
 FILE* myopen (const char* fname, const char* mode="rb", bool do_remove=false);
 //

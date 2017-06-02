@@ -416,3 +416,11 @@ char* print_vfast_config (VFASTConfig* vc, FILE* fp) {
   }
   return result;
 }
+
+struct timespec get_ms_ts (int ms)
+{
+  struct timespec ts;
+  ts.tv_sec = 0;
+  ts.tv_nsec = ms*1e6;
+  return ts;
+}

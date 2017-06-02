@@ -31,6 +31,7 @@ void disconn(Connection *c);
 int openRawSocket(const char *device, int *deviceIndex);
 void change_file_owner (FILE* fp, char* user);
 VFASTConfig** parse_vfast_config (char* config_file, int* nconfig);
+struct timespec get_ms_ts (int ms);
 char* print_vfast_config (VFASTConfig* vc, FILE* fp);
 
 #ifdef _cplusplus
