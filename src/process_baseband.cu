@@ -16,6 +16,7 @@
 #include "multilog.h"
 
 #include "util.h"
+#include "cuda_util.h"
 
 // from Julia's code
 extern "C" {
@@ -41,23 +42,31 @@ cudaEventElapsedTime (Z,X,Y);}
 #define VLITE_RATE 128000000
 #define VLITE_FRAME_RATE 25600
 #define NFFT 12500 // number of samples to filterbank
-#define NCHAN 6251 //output filterbank channels, including DC
+//#define NFFT 8192 // number of samples to filterbank
+#define NCHAN (NFFT/2+1) //output filterbank channels, including DC
+//#define NCHAN 4097 //output filterbank channels, including DC
 #define NSCRUNCH 8 // time scrunch factor
+//#define NSCRUNCH 5 // time scrunch factor
 #define SEG_PER_SEC 10 // break each second of data up into chunks
+//#define SEG_PER_SEC 5 // break each second of data up into chunks
 
 //static volatile int CHANMIN=2411; // minimum output channel (counting DC), from low
 //static volatile int CHANMIN=1; // minimum output channel (counting DC), from low
 //static volatile int CHANMAX=6250; // maximum output channel (counting DC), from low
 //__device__ int CHANMIN_d=1;
 //__device__ int CHANMAX_d=1;
-#define CHANMIN 11 // minimum output channel (counting DC), from low
+//#define CHANMIN 11 // minimum output channel (counting DC), from low
+#define CHANMIN 2155 // minimum output channel (counting DC), from low/
 #define CHANMAX 6250 // maximum output channel (counting DC), from low
+//#define CHANMIN 1 // minimum output channel (counting DC), from low
+//#define CHANMAX 4096 // maximum output channel (counting DC), from low
 static volatile int NBIT = 2;
 static FILE* logfile_fp = NULL;
 
 __global__ void convertarray (cufftReal *, unsigned char *, size_t);
 __global__ void detect_and_normalize (cufftComplex *, size_t);
 __global__ void detect_and_normalize2 (cufftComplex *, cufftReal*, float, float, size_t);
+__global__ void detect_and_normalize3 (cufftComplex *, cufftReal*, float, size_t);
 __global__ void histogram ( unsigned char *, unsigned int*, size_t);
 __global__ void pscrunch (cufftComplex *, size_t);
 __global__ void tscrunch (cufftComplex *, cufftReal *, size_t);
@@ -74,6 +83,7 @@ void usage ()
 	  "-o print logging messages to stderr (as well as logfile)\n"
 	  "-w output filterbank data (0=no sources, 1=listed sources, 2=all sources [def])\n"
 	  "-b reduce output to b bits (2 [def], 4, and 8 are supported))\n"
+	  "-P number of output polarizations (1=AA+BB, 2=AA,BB; 4 not implemented)\n"
 	  //"-m retain MUOS band\n"
 	  ,(uint64_t)READER_SERVICE_PORT);
 }
@@ -102,7 +112,8 @@ void print_cuda_properties () {
   printf("multiProcessors= %d\n",nsms);
 }
 
-int write_psrdada_header (dada_hdu_t* hdu, char* inchdr)
+// TODO -- make sure this is consistent with sigproc, specifically for time
+int write_psrdada_header (dada_hdu_t* hdu, char* inchdr,int npol)
 {
 
   // handle values from incoming header; set defaults if not available
@@ -140,9 +151,8 @@ int write_psrdada_header (dada_hdu_t* hdu, char* inchdr)
   dadacheck (ascii_header_set (ascii_hdr, "NCHAN", "%d", nchan) );
   dadacheck (ascii_header_set (ascii_hdr, "BANDWIDTH", "%lf", bw) );
   dadacheck (ascii_header_set (ascii_hdr, "CFREQ", "%lf", freq) );
-  dadacheck (ascii_header_set (ascii_hdr, "NPOL", "%d", 1) );
+  dadacheck (ascii_header_set (ascii_hdr, "NPOL", "%d", npol) );
   dadacheck (ascii_header_set (ascii_hdr, "NBIT", "%d", NBIT) );
-  dadacheck (ascii_header_set (ascii_hdr, "NPOL", "%d", NBIT) );
   dadacheck (ascii_header_set (ascii_hdr, "TSAMP", "%lf", tsamp) );
   dadacheck (ascii_header_set (ascii_hdr, "UTC_START", "%s", dada_utc) );
   multilog (hdu->log, LOG_INFO, "%s",ascii_hdr);
@@ -232,10 +242,10 @@ int main (int argc, char *argv[])
   uint64_t port = READER_SERVICE_PORT;
   int stderr_output = 0;
   int write_fb = 2;
-  int npol = 2;
+  int npol = 1;
 
   int arg = 0;
-  while ((arg = getopt(argc, argv, "hk:K:p:omw:b:")) != -1) {
+  while ((arg = getopt(argc, argv, "hk:K:p:omw:b:P:")) != -1) {
 
     switch (arg) {
 
@@ -288,6 +298,17 @@ int main (int argc, char *argv[])
       }
       if (!(NBIT==2 || NBIT==4 || NBIT==8)) {
         fprintf (stderr, "Unsupported NBIT!\n");
+        return -1;
+      }
+      break;
+
+    case 'P':
+      if (sscanf (optarg, "%d", &npol) != 1) {
+        fprintf (stderr, "writer: could not parse number of pols %s\n", optarg);
+        return -1;
+      }
+      if (!(npol==1 || npol==2)) {
+        fprintf (stderr, "Unsupported npol!\n");
         return -1;
       }
       break;
@@ -417,15 +438,18 @@ int main (int argc, char *argv[])
 
   // memory for running bandpass correction; 2 pol * NCHAN
   cufftReal* bp_dev; cudacheck (
-  cudaMalloc ((void**)&bp_dev,sizeof(cufftReal)*(NCHAN+2)*2));
+  cudaMalloc ((void**)&bp_dev,sizeof(cufftReal)*NCHAN*2));
+  cudacheck (cudaMemset (bp_dev, 0, sizeof(cufftReal)*NCHAN*2));
 
   #ifdef PROFILE
   CUDA_PROFILE_STOP(start,stop,&alloc_time)
   #endif
 
-  // constants for bandpass normalization
-  const float bp_wt_const = exp (-0.1/1.0); // 0.1s with tau=1.0s
-  float bp_wt_run = 0;
+  // constants for bandpass normalization: tsamp/tsmooth, giving a time
+  // constant of about tsmooth secs.
+  double tsmooth = 1;
+  double tsamp = double(NFFT)/VLITE_RATE*NSCRUNCH; // NB in mus
+  float bp_scale = tsamp/tsmooth;
 
   // allocate a frame buffer on the stack
   char frame_buff[5032];
@@ -593,7 +617,7 @@ int main (int argc, char *argv[])
 
   if (key_out) {
     //Write psrdada output header values
-    write_psrdada_header (hdu_out, incoming_hdr);
+    write_psrdada_header (hdu_out, incoming_hdr, npol);
   }
 
   // write out a sigproc header
@@ -766,14 +790,15 @@ int main (int argc, char *argv[])
       cudaEventRecord(start,0);
       #endif 
       //detect_and_normalize <<<(NCHAN*2)/NTHREAD+1,NTHREAD>>> (fft_out,numfft/2);
-      detect_and_normalize2 <<<(NCHAN*2)/NTHREAD+1,NTHREAD>>> (fft_out,bp_dev,bp_wt_const,bp_wt_run,numfft/2);
+      //detect_and_normalize2 <<<(NCHAN*2)/NTHREAD+1,NTHREAD>>> (fft_out,bp_dev,bp_wt_const,bp_wt_run,numfft/2);
+      //bp_wt_run = 1+bp_wt_const*bp_wt_run;
+      detect_and_normalize3 <<<(NCHAN*2)/NTHREAD+1,NTHREAD>>> (fft_out,bp_dev,bp_scale,numfft/2);
       cudacheck ( cudaGetLastError () );
       #ifdef PROFILE
       CUDA_PROFILE_STOP(start,stop,&elapsed)
       normalize_time += elapsed;
       #endif
       // update bandpass normalization
-      bp_wt_run = 1+bp_wt_const*bp_wt_run;
 
       #ifdef PROFILE
       cudaEventRecord (start,0);
@@ -1031,6 +1056,40 @@ __global__ void detect_and_normalize2 (cufftComplex *fft_out, cufftReal* bp,
     //fft_out[j].x = fft_out[j].x*sum1-1;
     fft_out[j].x = fft_out[j].x*bp[i]-1;
   }
+}
+
+__global__ void detect_and_normalize3 (cufftComplex *fft_out, cufftReal* bp, 
+        float scale, size_t ntime)
+{
+  int i = threadIdx.x + blockIdx.x*blockDim.x; 
+  if (i >= NCHAN*2) return;
+  if (i >= NCHAN) // advance pointer to next polarization
+  {
+    fft_out += ntime*NCHAN;
+    bp += NCHAN;
+    i -= NCHAN;
+  }
+  float bp_l = bp[i];
+  // initialize bandpass to mean of first block
+  if (0. == bp_l) {
+    for (int j = i; j < ntime*NCHAN; j+= NCHAN)
+      bp_l += fft_out[j].x*fft_out[j].x + fft_out[j].y*fft_out[j].y;
+    bp_l /= ntime;
+  }
+  for (int j = i; j < ntime*NCHAN; j+= NCHAN)
+  {
+    // detect
+    float pow = fft_out[j].x*fft_out[j].x + fft_out[j].y*fft_out[j].y;
+    // update bandpass
+    bp_l = scale*pow + (1-scale)*bp_l;
+    // scale to bandpass and mean-subtract; this assumes the powers are 
+    // chi^2_2 distributed, var(pow)=4, mean(pow)=std(pow)=2.  Therefore
+    // dividing by mean will give standard deviation of 1 centred at 1.
+    fft_out[j].x = pow/bp_l-1;
+
+  }
+  // write out current bandpass
+  bp[i] = bp_l;
 }
 
 // sum polarizations in place
