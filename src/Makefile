@@ -15,10 +15,10 @@ process_baseband: process_baseband.o util.o cuda_util.o utils.o
 	$(NVCC) -o process_baseband process_baseband.o utils.o util.o cuda_util.o -lcufft -lcurand -L../lib -lvdifio -lpsrdada
 
 process_baseband.o: process_baseband.cu
-	$(NVCC) -g -O2 --compiler-options -Wall -c -o $@ -I/usr/cuda-6.5/include -I../include process_baseband.cu 
+	$(NVCC) -g -O2 -gencode arch=compute_35,code=sm_35 --compiler-options -Wall -c -o $@ -I/usr/cuda-6.5/include -I../include process_baseband.cu 
 
 genbase: genbase.cu util.o cuda_util.o
-	$(NVCC) -g -O2 --compiler-options -Wall -I/usr/cuda-6.5/include -I/usr/cuda-6.5/samples/common/inc -I/users/mkerr/mtk/include -c genbase.cu
+	$(NVCC) -g -O2 -gencode arch=compute_35,code=sm_35 --compiler-options -Wall -I/usr/cuda-6.5/include -I/usr/cuda-6.5/samples/common/inc -I/users/mkerr/mtk/include -c genbase.cu
 	$(NVCC) -o genbase util.o cuda_util.o genbase.o -lcufft -lcurand -L../lib -lvdifio -lpsrdada
 
 readbase:	readbase.c util.o
