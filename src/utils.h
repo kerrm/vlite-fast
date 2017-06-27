@@ -24,7 +24,7 @@ typedef struct
 } VFASTConfig;
 
 int serve(int port, Connection* c);
-int wait_for_cmd(Connection* c);
+int wait_for_cmd(Connection* c, FILE* fp);
 void event_to_file(const ipcio_t* db, FILE* evfd);
 int conn(Connection *c);
 void disconn(Connection *c);
