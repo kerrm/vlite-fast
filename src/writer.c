@@ -73,35 +73,36 @@ int write_psrdada_header(dada_hdu_t* hdu, vdif_header* hdr, ObservationDocument*
 
 void print_observation_document(char* result, ObservationDocument* od)
 {
-  char s[64];
+  int lens = 128;
+  char s[lens];
   snprintf(result,2048,"    datasetId = %s\n", od->datasetId);
-  snprintf(s,64,"    configId = %s\n", od->configId);
+  snprintf(s,lens,"    configId = %s\n", od->configId);
   strcat(result,s);
-  snprintf(s,64,"    startTime = %10.8f\n", od->startTime);
+  snprintf(s,lens,"    startTime = %10.8f\n", od->startTime);
   strcat(result,s);
-  snprintf(s,64,"    name = %s\n", od->name);
+  snprintf(s,lens,"    name = %s\n", od->name);
   strcat(result,s);
-  snprintf(s,64,"    ra = %10.8f\n", od->ra);
+  snprintf(s,lens,"    ra = %10.8f\n", od->ra);
   strcat(result,s);
-  snprintf(s,64,"    dec = %10.8f\n", od->dec);
+  snprintf(s,lens,"    dec = %10.8f\n", od->dec);
   strcat(result,s);
-  snprintf(s,64,"    dra = %10.8f\n", od->dra);
+  snprintf(s,lens,"    dra = %10.8f\n", od->dra);
   strcat(result,s);
-  snprintf(s,64,"    ddec = %10.8f\n", od->ddec);
+  snprintf(s,lens,"    ddec = %10.8f\n", od->ddec);
   strcat(result,s);
-  snprintf(s,64,"    azoffs = %10.8f\n", od->azoffs);
+  snprintf(s,lens,"    azoffs = %10.8f\n", od->azoffs);
   strcat(result,s);
-  snprintf(s,64,"    eloffs = %10.8f\n", od->eloffs);
+  snprintf(s,lens,"    eloffs = %10.8f\n", od->eloffs);
   strcat(result,s);
-  snprintf(s,64,"    startLST = %10.8f\n", od->startLST);
+  snprintf(s,lens,"    startLST = %10.8f\n", od->startLST);
   strcat(result,s);
-  snprintf(s,64,"    scanNo = %d\n", od->scanNo);
+  snprintf(s,lens,"    scanNo = %d\n", od->scanNo);
   strcat(result,s);
-  snprintf(s,64,"    subscanNo = %d\n", od->subscanNo);
+  snprintf(s,lens,"    subscanNo = %d\n", od->subscanNo);
   strcat(result,s);
-  snprintf(s,64,"    primaryBand = %s\n", od->primaryBand);
+  snprintf(s,lens,"    primaryBand = %s\n", od->primaryBand);
   strcat(result,s);
-  snprintf(s,64,"    usesPband = %d\n", od->usesPband);
+  snprintf(s,lens,"    usesPband = %d\n", od->usesPband);
   strcat(result,s);
 }
 
@@ -173,9 +174,13 @@ int main(int argc, char** argv)
   }
 
   fd_set readfds;
-  struct timeval tv; //timeout for select()
-  tv.tv_sec = 0;
-  tv.tv_usec = 500; // set this to block long enough to receive a VLITE packet
+  struct timeval tv_500mus; //timeout for select()
+  tv_500mus.tv_sec = 0;
+  tv_500mus.tv_usec = 500; // set this to block long enough to receive a VLITE packet
+
+  struct timeval tv_1s; //timeout for raw socket
+  tv_500mus.tv_sec = 1;
+  tv_500mus.tv_usec = 0;
 
   Connection c;
   c.sockoptval = 1; //release port immediately after closing connection
@@ -203,7 +208,7 @@ int main(int argc, char** argv)
   char logfile[128];
   pid_t pid = getpid();
   snprintf (logfile,128,
-      "%s/%s_%s_writer_%06d.log",LOGDIR,hostname,currt_string,pid);
+      "%s/%s_%s_writer_%06d.log",LOGDIR,currt_string,hostname,pid);
   //FILE *logfile_fp = fopen (logfile, "w");
   logfile_fp = fopen (logfile, "w");
   multilog_add (log, logfile_fp);
@@ -242,7 +247,7 @@ int main(int argc, char** argv)
   if (raw.svc > maxsock)
     maxsock = raw.svc;
   // TODO -- see if we need this -- set timeout on raw socket read
-  // setsockopt(raw.svc, SOL_SOCKET, SO_RCVTIMEO, (const char *)&(tv), sizeof(tv));
+  setsockopt(raw.svc, SOL_SOCKET, SO_RCVTIMEO, (const char *)&(tv_1s), sizeof(tv_1s));
 
   // Open observation information socket
   if (serve (iport, &ci) < 0) {
@@ -262,7 +267,7 @@ int main(int argc, char** argv)
 
     if (state == STATE_STOPPED) {
       if (cmd == CMD_NONE)
-        cmd = wait_for_cmd (&c);
+        cmd = wait_for_cmd (&c, logfile_fp);
 
       if (cmd == CMD_START) 
       {
@@ -290,6 +295,7 @@ int main(int argc, char** argv)
         }
         write_header = 1;
         multilog (log, LOG_INFO, "After dada_hdu_lock_write\n");
+        fflush (logfile_fp);
         cmd = CMD_NONE;
       }
       else if (cmd == CMD_EVENT) {
@@ -314,15 +320,16 @@ int main(int argc, char** argv)
       FD_ZERO (&readfds);
       FD_SET (c.rqst, &readfds);
       FD_SET (raw.svc, &readfds);
-      if (select (maxsock+1,&readfds,NULL,NULL,&tv) < 0)
+      if (select (maxsock+1,&readfds,NULL,NULL,&tv_500mus) < 0)
       {
         multilog (log, LOG_ERR, "[STATE_STARTED] Error calling select.");
+        fflush (logfile_fp);
         exit (EXIT_FAILURE);
       }
       
       //if input is waiting on listening socket, read it
       if (FD_ISSET (c.rqst,&readfds)) {
-        cmd = wait_for_cmd (&c);
+        cmd = wait_for_cmd (&c, logfile_fp);
       }
 
       if (cmd == CMD_EVENT) {
@@ -355,10 +362,10 @@ int main(int argc, char** argv)
         }
 
         //Get pending commands, resume writing to ring buffer if there are none
-        FD_ZERO(&readfds);
-        FD_SET(c.rqst, &readfds);
-        FD_SET(raw.svc, &readfds);
-        if (select(maxsock+1,&readfds,NULL,NULL,&tv) < 0)
+        FD_ZERO (&readfds);
+        FD_SET (c.rqst, &readfds);
+        FD_SET (raw.svc, &readfds);
+        if (select (maxsock+1,&readfds,NULL,NULL,&tv_500mus) < 0)
         {
           fprintf(stderr,"Error calling select.");
           exit(1);
@@ -366,7 +373,7 @@ int main(int argc, char** argv)
 
         state = STATE_STOPPED;
         if (FD_ISSET (c.rqst,&readfds)) {
-          cmd = wait_for_cmd (&c);
+          cmd = wait_for_cmd (&c, logfile_fp);
           fprintf(stderr,
               "Writer: flushed out command socket after event_to_file.\n");
         }
@@ -376,7 +383,7 @@ int main(int argc, char** argv)
         continue; 
       }
       
-      //if command is stop, change state to STOPPED, close data block
+      //CMD_STOP --> change state to STOPPED, close data block
       else if (cmd == CMD_STOP) {
         state = STATE_STOPPED;
         skip_frames = 0;
@@ -390,14 +397,17 @@ int main(int argc, char** argv)
             "Wrote %d packets to psrdada buffer.\n",packets_written);
         packets_written = 0;
         cmd = CMD_NONE;
+        fflush (logfile_fp);
         continue;
       }
 
-      //if command is quit, close data block, shutdown listening socket, return
+      //CMD_QUIT --> close data block, shutdown listening socket, return
       else if (cmd == CMD_QUIT) {
-        multilog (log, LOG_INFO, "[STATE_STARTED] received CMD_QUIT, exiting.\n");
         multilog (log, LOG_INFO,
-            "dada_hdu_unlock_write result = %d.\n", dada_hdu_unlock_write (hdu));
+            "[STATE_STARTED] received CMD_QUIT, exiting.\n");
+        multilog (log, LOG_INFO,
+            "dada_hdu_unlock_write result = %d.\n",
+            dada_hdu_unlock_write (hdu));
         break;
       }
 
@@ -410,8 +420,9 @@ int main(int argc, char** argv)
       //read a packet from the data socket and write it to the ring buffer
       if (FD_ISSET (raw.svc,&readfds)) {
         
-        // this is a little kluge to reduce CPU utilization; if we are in a started state,
-        // read multiple packets before looping back to multiplex and check for commands
+        // This is a little kluge to reduce CPU utilization.
+        // If we are in START_STARTED, read multiple packets before 
+        // looping back to multiplex and check for commands
         for (int ipacket = 0; ipacket < 20; ++ipacket) {
 
           raw_bytes_read = recvfrom (raw.svc, buf, BUFSIZE, 0, 
@@ -426,7 +437,8 @@ int main(int argc, char** argv)
 
             if (write_header) {
               multilog (log, LOG_INFO, "Writing psrdada header.\n");
-              write_psrdada_header (hdu, (vdif_header *)(buf + UDP_HDR_SIZE), &od);
+              write_psrdada_header (
+                  hdu, (vdif_header *)(buf + UDP_HDR_SIZE), &od);
               write_header = 0;
             }
 
@@ -441,18 +453,20 @@ int main(int argc, char** argv)
             }
             else
               packets_written++;
-
           }
           else if (raw_bytes_read <= 0) {
-            multilog (log, LOG_ERR, "Raw socket read failed: %d\n.", raw_bytes_read);
+            multilog (log, LOG_ERR,
+                "Raw socket read failed: %d\n.", raw_bytes_read);
+            fflush (logfile_fp);
             cmd = CMD_STOP;
-            continue;
+            break; // break from multi-packet loop
           }
           else {
             multilog (log, LOG_ERR,
                 "Received packet size: %d, ignoring.\n", raw_bytes_read);
+            fflush (logfile_fp);
             cmd = CMD_STOP;
-            continue;
+            break; // break from multi-packet loop
           }
         } // end multiple packet read
       } // end raw socket read logic
