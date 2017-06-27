@@ -23,7 +23,7 @@
 #include "util.h"
 #include "cuda_util.h"
 
-#define DEVICE 1        //GPU. on furby: 0 = TITAN Black, 1 = GTX 780
+#define DEVICE 0        //GPU. on furby: 0 = TITAN Black, 1 = GTX 780
 #define NTHREAD 512
 #define WRITE_DADA 1 // write to psrdada output
 
@@ -48,6 +48,7 @@ void usage ()
 	  "-p pulse period [s; default 0.5]"
 	  "-a amplitude as fraction of Tsys [default 0.05]"
 	  "-s scale of second polarization relative to first [default 1.0]"
+	  "-r seed for random number generator [long; default=42]"
 	  "-d dm [default=30; NB this is about the largest feasible]"
 	  "-n observations to simulate (default: 1)\n");
 }
@@ -60,7 +61,8 @@ int main(int argc, char *argv[])
   float ampls[2] = {1.05,1.05};
   int nobs = 1;
   int arg = 0;
-  while ((arg = getopt(argc, argv, "ht:n:p:a:s:d:")) != -1) {
+  long seed = 42;
+  while ((arg = getopt(argc, argv, "ht:n:p:a:s:d:r:")) != -1) {
 
     switch (arg) {
 
@@ -109,6 +111,12 @@ int main(int argc, char *argv[])
         return -1;
       }
 
+    case 'r':
+      if (sscanf (optarg, "%li", &seed) != 1) {
+        fprintf (stderr, "genbase: could not read seed from %s\n", optarg);
+        return -1;
+      }
+
     }
   }
 
@@ -138,7 +146,7 @@ int main(int argc, char *argv[])
 
   // allocate memory for 1s of data; NB this is a large buffer, but because
   // of edge effects, will discard ~0.37s of data at DM=30!
-  size_t buflen = VLITE_RATE;
+  size_t buflen = VLITE_RATE/4;
   cufftReal* fdat_dev; cudacheck (
   cudaMalloc ((void**)&fdat_dev, sizeof(cufftReal)*buflen) );
 
@@ -178,7 +186,6 @@ int main(int argc, char *argv[])
   // set up RNG for voltage generated
   curandGenerator_t gen;
   curandcheck (curandCreateGenerator (&gen, CURAND_RNG_PSEUDO_DEFAULT) );
-  long seed = 42;
   curandcheck (curandSetPseudoRandomGeneratorSeed (gen, seed) );
 
   // set up the FFTs; NB same plan for forward and backward
@@ -462,7 +469,10 @@ __global__ void digitize(float* idat, uint8_t* udat, size_t n)
       i += blockDim.x*gridDim.x)
   {
     // add an extra 2 here for overhead in case we make it bright
-    float tmp = idat[i]/0.02957/2 + 127.5;
+    //float tmp = idat[i]/0.02957/2 + 127.5;
+    // this normalization appears to be more consistent with the VLITE
+    // digitizers, which have a mean of 128
+    float tmp = idat[i]/0.02957/2 + 128.5;
     if (tmp <= 0)
       udat[i] = 0;
     else if (tmp >= 255)
