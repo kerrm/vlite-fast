@@ -1,3 +1,4 @@
+// system support
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -7,14 +8,15 @@
 
 #include "vdifio.h"
 
-#include <cufft.h>
-
+// psrdada support
 #include "dada_def.h"
 #include "dada_hdu.h"
 #include "ipcio.h"
 #include "ascii_header.h"
 #include "multilog.h"
 
+// local support
+#include "process_baseband.h"
 #include "util.h"
 #include "cuda_util.h"
 
@@ -25,73 +27,9 @@ extern "C" {
 #include "executor.h"
 }
 
-// GPU options
-#define DEVICE 0
-#define NTHREAD 512
-//#define PROFILE 1
-#define CUDA_PROFILE_STOP(X,Y,Z) {\
-cudaEventRecord (Y,0);\
-cudaEventSynchronize (Y);\
-cudaEventElapsedTime (Z,X,Y);}
-
-
-#define VD_FRM 5032
-#define VD_DAT 5000
-#define VLITE_RATE 128000000
-#define VLITE_FRAME_RATE 25600
-#define NFFT 12500 // number of samples to filterbank
-//#define NFFT 8192 // number of samples to filterbank
-#define NCHAN (NFFT/2+1) //output filterbank channels, including DC
-//#define NCHAN 4097 //output filterbank channels, including DC
-#define NSCRUNCH 8 // time scrunch factor
-//#define NSCRUNCH 5 // time scrunch factor
-#define SEG_PER_SEC 10 // break each second of data up into chunks
-//#define SEG_PER_SEC 5 // break each second of data up into chunks
-#define NKURTO 500
-#define DOHISTO 0
-#define DOKURTO 1
-#ifndef WRITE_KURTO
-#define WRITE_KURTO 0
-#endif
-// TS should be normally distributed, so take 3-sigma as a threshold
-#define DAG_THRESH 3.0
-// these are more skew because they integrate over longer time, only
-// excise the really bad ones
-#define DAG_FB_THRESH 5.0
-//#define DEBUG_WEIGHTS 1
-# // exclude samples with more than 80% RFI
-#define MIN_WEIGHT 0.2
-
-//static volatile int CHANMIN=2411; // minimum output channel (counting DC), from low
-//static volatile int CHANMIN=1; // minimum output channel (counting DC), from low
-//static volatile int CHANMAX=6250; // maximum output channel (counting DC), from low
-//__device__ int CHANMIN_d=1;
-//__device__ int CHANMAX_d=1;
-//#define CHANMIN 11 // minimum output channel (counting DC), from low
-#define CHANMIN 2155 // minimum output channel (counting DC), from low/
-#define CHANMAX 6250 // maximum output channel (counting DC), from low
-//#define CHANMIN 1 // minimum output channel (counting DC), from low
-//#define CHANMAX 4096 // maximum output channel (counting DC), from low
 static volatile int NBIT = 2;
 static FILE* logfile_fp = NULL;
 
-__global__ void convertarray (cufftReal *, unsigned char *, size_t);
-__global__ void kurtosis (cufftReal *, cufftReal *, cufftReal *);
-__global__ void compute_dagostino (cufftReal *, cufftReal* ,size_t);
-__global__ void compute_dagostino2 (cufftReal *, cufftReal* ,size_t);
-__global__ void block_kurtosis (cufftReal*, cufftReal*, cufftReal*, cufftReal*, cufftReal*);
-__global__ void apply_kurtosis (cufftReal *, cufftReal *, cufftReal *, cufftReal*, cufftReal*);
-//__global__ void detect_and_normalize (cufftComplex *, size_t);
-__global__ void detect_and_normalize2 (cufftComplex *, cufftReal*, float, size_t);
-__global__ void detect_and_normalize3 (cufftComplex *, cufftReal*, cufftReal*, float, size_t);
-__global__ void histogram ( unsigned char *, unsigned int*, size_t);
-__global__ void pscrunch (cufftComplex *, size_t);
-__global__ void pscrunch_weights (cufftComplex *, cufftReal*, size_t);
-__global__ void tscrunch (cufftComplex *, cufftReal *, size_t);
-__global__ void tscrunch_weights (cufftComplex *, cufftReal* , cufftReal* , size_t);
-__global__ void sel_and_dig_2b (cufftReal*, unsigned char*, size_t, int);
-__global__ void sel_and_dig_4b (cufftReal*, unsigned char*, size_t, int);
-__global__ void sel_and_dig_8b (cufftReal*, unsigned char*, size_t, int);
 
 void usage ()
 {
@@ -103,6 +41,7 @@ void usage ()
 	  "-w output filterbank data (0=no sources, 1=listed sources, 2=all sources [def])\n"
 	  "-b reduce output to b bits (2 [def], 4, and 8 are supported))\n"
 	  "-P number of output polarizations (1=AA+BB, 2=AA,BB; 4 not implemented)\n"
+    "-s process a single observation, then quit (used for debugging)\n"
 	  //"-m retain MUOS band\n"
 	  ,(uint64_t)READER_SERVICE_PORT);
 }
@@ -113,23 +52,6 @@ void sigint_handler (int dummy) {
   exit (EXIT_SUCCESS);
 }
 
-
-void print_cuda_properties () {
-  cudaDeviceProp prop;
-  int device_idx=DEVICE;
-  cudaGetDeviceProperties (&prop,device_idx);
-  int nsms;
-  cudaDeviceGetAttribute (&nsms,cudaDevAttrMultiProcessorCount,DEVICE);
-  printf("%s:\n",prop.name);
-  printf("maxThreadsPerBlock= %d\n",prop.maxThreadsPerBlock);
-  printf("maxThreadsDim[0]= %d\n",prop.maxThreadsDim[0]);
-  printf("maxThreadsDim[1]= %d\n",prop.maxThreadsDim[1]);
-  printf("maxThreadsDim[2]= %d\n",prop.maxThreadsDim[2]);
-  printf("maxGridSize[0]= %d\n",prop.maxGridSize[0]);
-  printf("maxGridSize[1]= %d\n",prop.maxGridSize[1]);
-  printf("maxGridSize[2]= %d\n",prop.maxGridSize[2]);
-  printf("multiProcessors= %d\n",nsms);
-}
 
 void change_extension (const char* in, char* out, const char* oldext, const char* newext)
 {
@@ -272,9 +194,10 @@ int main (int argc, char *argv[])
   int write_fb = 2;
   int npol = 1;
   int major_skip = 0;
+  int single_pass = 0;  
 
   int arg = 0;
-  while ((arg = getopt(argc, argv, "hk:K:p:omw:b:P:")) != -1) {
+  while ((arg = getopt(argc, argv, "hk:K:p:omw:b:P:s")) != -1) {
 
     switch (arg) {
 
@@ -342,24 +265,22 @@ int main (int argc, char *argv[])
       }
       break;
 
+    case 's':
+      single_pass = 1;
+      break;
+
     }
   }
 
   cudacheck (cudaSetDevice (DEVICE));
-
-  cudaDeviceProp prop;
-  int device_idx=DEVICE;
-  cudaGetDeviceProperties (&prop,device_idx);
-  //print_cuda_properties();
   int nsms;
   cudaDeviceGetAttribute (&nsms,cudaDevAttrMultiProcessorCount,DEVICE);
 
-  struct timespec ts_1ms;
-  ts_1ms.tv_sec = 0;
-  ts_1ms.tv_nsec = 1000000;
+  struct timespec ts_1ms = get_ms_ts (1);
+  struct timespec ts_10s = get_ms_ts (10000);
 
-  //create and start timing
   #ifdef PROFILE
+  // support for measuring run times of parts
   cudaEvent_t start,stop,start_total,stop_total;
   cudaEventCreate (&start);
   cudaEventCreate (&stop);
@@ -372,6 +293,7 @@ int main (int argc, char *argv[])
       digitize_time=0, write_time=0, flush_time=0, misc_time=0,
       elapsed=0, total_time=0;
   #endif
+  // measure full run time time
   cudaEvent_t obs_start, obs_stop;
   cudaEventCreate (&obs_start);
   cudaEventCreate (&obs_stop);
@@ -410,7 +332,6 @@ int main (int argc, char *argv[])
     multilog (log, LOG_ERR, "Only NKURTO==250 or 500 supported.\n");
     exit (EXIT_FAILURE);
   }
-
 
   // connect to input buffer
   dada_hdu_t* hdu_in = dada_hdu_create (log);
@@ -584,6 +505,16 @@ int main (int argc, char *argv[])
   char cmd_buff[32];
 
   int quit = 0;
+
+  // TEMP for profiling
+  if (single_pass)
+  {
+    char cmd[256];
+    snprintf (cmd, 255, "/home/vlite-master/mtk/src/readbase /home/vlite-master/mtk/baseband/20150302_151845_B0329+54_ev_0005.out.uw"); 
+    multilog (log, LOG_INFO, "%s\n", cmd);
+    popen (cmd, "r");
+    nanosleep (&ts_10s,NULL);
+  }
 
   // This point start to loop over observations.
   while(true)
@@ -807,10 +738,13 @@ int main (int argc, char *argv[])
   #endif
 
   // launch heimdall
-  char heimdall_cmd[256];
-  snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 62500 -gpu_id 0 -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -k %x -v", key_out); 
-  printf ("%s\n", heimdall_cmd);
-  FILE* heimdall_fp = popen (heimdall_cmd, "r");
+  FILE* heimdall_fp;
+  if (key_out) {
+    char heimdall_cmd[256];
+    snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 62500 -gpu_id 0 -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -k %x -v", key_out); 
+    multilog (log, LOG_INFO, "%s\n", heimdall_cmd);
+    heimdall_fp = popen (heimdall_cmd, "r");
+  }
 
   bool skipped_data_announced = false;
 
@@ -838,8 +772,10 @@ int main (int argc, char *argv[])
           skipped_data_announced = true;
         }
         // set the intervening memory to zeros
-        idx = VLITE_RATE*thread + (current_sample[thread]+1)*VD_DAT;
-        memset (udat+idx,0,VD_DAT*(sample-current_sample[thread]-1));
+        // TODO -- not sure this is correct, and not sure what to set
+        // memory to, if anything; probably should just abort
+        //idx = VLITE_RATE*thread + (current_sample[thread]+1)*VD_DAT;
+        //memset (udat+idx,0,VD_DAT*(sample-current_sample[thread]-1));
       }
       current_sample[thread] = sample;
 
@@ -1212,6 +1148,8 @@ int main (int argc, char *argv[])
     multilog (log, LOG_INFO, "Heimdall lag time...%.3f\n", 
       heimdall_time*1e-3);
   }
+  // simulate the effects of running behind here to see what disaster haps
+  //nanosleep (&ts_10s,NULL);
 
   // If there has been a major skip, need to continue to read from
   // buffer so it doesn't fill up
@@ -1222,6 +1160,7 @@ int main (int argc, char *argv[])
       ssize_t nread = ipcio_read (hdu_in->data_block,frame_buff,VD_FRM);
       if (nread < 0 ) {
         multilog (log, LOG_ERR, "Error on nread on major skip clear.\n");
+        // TODO -- exit more gracefully here?
         return (EXIT_FAILURE);
       }
       if (nread != VD_FRM) {
@@ -1265,6 +1204,9 @@ int main (int argc, char *argv[])
   multilog (log, LOG_INFO, "Sum of subs.%.3f\n", sub_time*1e-3);
   multilog (log, LOG_INFO, "Total run...%.3f\n", total_time*1e-3);
   #endif
+
+  if (single_pass)
+    break;
 
   } // end loop over observations
 
