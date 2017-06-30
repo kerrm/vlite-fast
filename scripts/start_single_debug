@@ -10,7 +10,7 @@
 # $8 = filterbank dada key 
 # $9 = write_fb
 # $10 = nbit
-#set -x
+set -x
 export LD_LIBRARY_PATH=/home/vlite-master/mtk/lib:/usr/cuda-6.5/lib64:${LD_LIBRARY_PATH}
 #sleep 0.5
 
@@ -27,5 +27,4 @@ sleep 0.5
 # $3 = filterbank dada key 
 # $4 = write_fb
 # $5 = nbit
-#sudo LD_LIBRARY_PATH=${LD_LIBRARY_PATH} -b /home/vlite-master/mtk/scripts/start_process ${4} ${7} ${8} ${9} ${10}
-/home/vlite-master/mtk/scripts/start_process ${4} ${7} ${8} ${9} ${10} &
+/home/vlite-master/mtk/scripts/start_process_debug ${4} ${7} ${8} ${9} ${10}

@@ -12,7 +12,7 @@ void dadacheck (int rcode)
 FILE* myopen(const char* fname, const char* mode, bool do_remove)
 {
   if (do_remove && access(fname,F_OK)!=-1 )
-    remove(fname);
+    remove (fname);
   FILE* fp = fopen (fname, mode);
   if (NULL==fp)
   {

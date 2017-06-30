@@ -14,7 +14,7 @@ all: process_baseband genbase readbase messenger writer
 process_baseband: process_baseband.o util.o cuda_util.o utils.o
 	$(NVCC) -o process_baseband process_baseband.o utils.o util.o cuda_util.o -lcufft -lcurand -L../lib -lvdifio -lpsrdada
 
-process_baseband.o: process_baseband.cu
+process_baseband.o: process_baseband.cu process_baseband.h
 	$(NVCC) -g -O2 -gencode arch=compute_35,code=sm_35 --compiler-options -Wall -c -o $@ -I/usr/cuda-6.5/include -I../include process_baseband.cu 
 
 genbase: genbase.cu util.o cuda_util.o

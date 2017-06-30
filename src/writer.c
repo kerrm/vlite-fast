@@ -44,7 +44,7 @@ int write_psrdada_header(dada_hdu_t* hdu, vdif_header* hdr, ObservationDocument*
 {
   // big TODO is to get the information from the messenger process
   char* ascii_hdr = ipcbuf_get_next_write (hdu->header_block);
-  short int station_id = getVDIFStationID (hdr);
+  int station_id = getVDIFStationID (hdr);
   dadacheck (ascii_header_set (ascii_hdr, "STATIONID", "%d",station_id) );
   dadacheck (ascii_header_set (ascii_hdr, "NCHAN", "%d", 1) );
   dadacheck (ascii_header_set (ascii_hdr, "BANDWIDTH", "%lf", -64.) );
@@ -279,6 +279,9 @@ int main(int argc, char** argv)
         info_bytes_read = read (ci.rqst,ci.buf,1024);
         multilog (log, LOG_INFO, "Read %d bytes from fd %d, expected %d.\n", 
             info_bytes_read,ci.rqst,sizeof(ObservationDocument));
+        // TODO -- what could happen here if heimdall runs behind, or if 
+        // we have a long transient dump, is that we receive multiple ODs?
+        // so check for a multiple of sizeof(OD) and then use the last one
         if (info_bytes_read != sizeof(ObservationDocument)) {
           // TODO will have to decide how to handle this error
           multilog (log, LOG_ERR, "Not a valid ObservationDocument!\n");
@@ -333,52 +336,55 @@ int main(int argc, char** argv)
       }
 
       if (cmd == CMD_EVENT) {
-        // NB -- am ignoring this logic branch for now, hence below printf
-        printf("in CMD_EVENT, should not be here\n");
         //close data block
-        if (dada_hdu_unlock_write(hdu) < 0) {
-          fprintf(stderr,"unable to unlock psrdada HDU, exiting\n");
-          exit(EXIT_FAILURE);
+        if (dada_hdu_unlock_write (hdu) < 0) {
+          multilog (log, LOG_ERR, "unable to unlock psrdada HDU, exiting\n");
+          exit (EXIT_FAILURE);
         }
         //fprintf(stderr,"after dada_hdu_unlock_write\n");
         
         //dump DB to file
-        currt = time(NULL);
-        localtime_r(&currt,&tmpt);
-        strftime(currt_string,sizeof(currt_string), "%Y%m%d_%H%M%S", &tmpt);
+        currt = time (NULL);
+        localtime_r (&currt,&tmpt);
+        strftime (currt_string,sizeof(currt_string), "%Y%m%d_%H%M%S", &tmpt);
         *(currt_string+15) = 0;
         char eventfile[128];
-        snprintf(eventfile, 128,
+        snprintf (eventfile, 128,
             "%s/%s%s_%s_ev.out",EVENTDIR,starthost,dev,currt_string);
         
-        FILE* evfd;
-        if((evfd = fopen(eventfile,"w")) == NULL) {
-          fprintf(stderr,
-              "Writer: Could not open file %s for writing.\n",eventfile);
+        if (access (eventfile,F_OK) !=-1)
+          remove (eventfile);
+        FILE* evfd = fopen (eventfile, "wb");
+        if (NULL==evfd)
+        {
+          multilog (log, LOG_ERR, "Unable to open %s, aborting.\n",eventfile);
+          exit (EXIT_FAILURE);
         }
-        else {
-          event_to_file(hdu->data_block,evfd);
-          fclose(evfd);
-        }
+        multilog (log, LOG_INFO, "Dumping buffer to %s.\n", eventfile);
+        event_to_file (hdu->data_block,evfd);
+        fclose (evfd);
+        multilog (log, LOG_INFO, "Finished dumping buffer to %s.\n", eventfile);
 
         //Get pending commands, resume writing to ring buffer if there are none
+        // MTK -- no, stay stopped after an event for now
         FD_ZERO (&readfds);
         FD_SET (c.rqst, &readfds);
         FD_SET (raw.svc, &readfds);
         if (select (maxsock+1,&readfds,NULL,NULL,&tv_500mus) < 0)
         {
-          fprintf(stderr,"Error calling select.");
-          exit(1);
+          multilog (log, LOG_ERR, "Error calling select.\n");
+          exit (EXIT_FAILURE);
         }
 
         state = STATE_STOPPED;
         if (FD_ISSET (c.rqst,&readfds)) {
           cmd = wait_for_cmd (&c, logfile_fp);
-          fprintf(stderr,
+          multilog (log, LOG_ERR,
               "Writer: flushed out command socket after event_to_file.\n");
         }
+        // stay stopped
         else
-          cmd = CMD_START; 
+          cmd = CMD_NONE; 
         
         continue; 
       }
@@ -389,12 +395,12 @@ int main(int argc, char** argv)
         skip_frames = 0;
         if (dada_hdu_unlock_write (hdu) < 0) {
           multilog (log, LOG_ERR,
-              "Writer: unable to unlock psrdada HDU, exiting\n");
+              "[STATE_STARTED->STOP]: unable to unlock psrdada HDU, exiting\n");
           exit_status = EXIT_FAILURE;
           break;
         }
         multilog (log, LOG_INFO, 
-            "Wrote %d packets to psrdada buffer.\n",packets_written);
+            "[STATE_STARTED->STOP] Wrote %d packets to psrdada buffer.\n",packets_written);
         packets_written = 0;
         cmd = CMD_NONE;
         fflush (logfile_fp);
@@ -404,7 +410,7 @@ int main(int argc, char** argv)
       //CMD_QUIT --> close data block, shutdown listening socket, return
       else if (cmd == CMD_QUIT) {
         multilog (log, LOG_INFO,
-            "[STATE_STARTED] received CMD_QUIT, exiting.\n");
+            "[STATE_STARTED->QUIT], exiting.\n");
         multilog (log, LOG_INFO,
             "dada_hdu_unlock_write result = %d.\n",
             dada_hdu_unlock_write (hdu));
@@ -413,7 +419,7 @@ int main(int argc, char** argv)
 
       else if (cmd == CMD_START) {
         multilog (log, LOG_INFO,
-            "[STATE_STARTED] ignored CMD_START.\n");
+            "[STATE_STARTED->START] ignored CMD_START.\n");
         cmd = CMD_NONE;
       }
 

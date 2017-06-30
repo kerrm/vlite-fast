@@ -26,7 +26,10 @@
 
 void usage ()
 {
-  fprintf(stdout,"Usage: readbase [filename]\n");
+  fprintf(stdout,
+      "Read a recorded baseband dump into a psrdada buffer "
+      "(for testing / post-processing.\n"
+      "Usage: readbase [filename]\n");
 }
 
 int main(int argc, char *argv[])
@@ -34,7 +37,7 @@ int main(int argc, char *argv[])
   char input_file[256];
   // check for mandatory input
   if (argc != 2)
-    fprintf (stderr, "Must specify configuration file!.\n");
+    fprintf (stderr, "Must specify input file!.\n");
   snprintf (input_file, 256, argv[1]);
 
   //char hdr_buff[32];

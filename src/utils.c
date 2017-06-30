@@ -20,7 +20,7 @@
 
 
 //Adapted from http://www.cs.rutgers.edu/~pxk/417/notes/sockets/demo-03.html
-int serve(int port, Connection* c) {	
+int serve (int port, Connection* c) {	
 
   gethostname(c->hostname, MAXHOSTNAME);
 
@@ -98,7 +98,7 @@ int serve(int port, Connection* c) {
 
   XXX: Check that socket is still open? (how?)
  */
-int wait_for_cmd(Connection* c, FILE* outstream) {
+int wait_for_cmd (Connection* c, FILE* outstream) {
 
   if (NULL == outstream) outstream = stderr;
 
@@ -116,7 +116,9 @@ int wait_for_cmd(Connection* c, FILE* outstream) {
 
   //Normal operation: one command character received at a time; NB that
   //there seem to be a minimum of three bytes, the character, CR, newline?
-  if(nbytes == 3) {
+  // MTK -- I assume note above is from telnet; direct commands sent over
+  // socket will have fewer, so changed == to <=.
+  if(nbytes <= 3) {
       fprintf (outstream, "wait_for_cmd: Triggered with %c.\n",c->buf[0]);
     switch(c->buf[0]) {
     case CMD_START: return CMD_START;

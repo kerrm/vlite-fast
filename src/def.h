@@ -24,7 +24,7 @@
 
 #define MAXFRAMENUM 25599
 
-#define EVENTDIR "/home/vlite-master/frb-search/pulsar-vdif-data"
+#define EVENTDIR "/home/vlite-master/mtk/events"
 #define LOGDIR "/home/vlite-master/mtk/logs"
 #define DATADIR "/home/vlite-master/mtk/data"
 #define OBSINFODIR "/home/vlite-master/mtk/logs/obsinfo-antprop"

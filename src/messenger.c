@@ -31,15 +31,18 @@ char alertgrp[] = "239.192.2.3";
 
 // for signal handling and graceful termination
 static volatile int keep_running = 1;
+static volatile int signal_received = 0;
 
 void usage ()
 {
   fprintf(stdout,"Usage: messenger configuration_file [options]\n"
 	  "-m enable manual control on specified port (e.g. via telnet)\n"
+	  "-o print logging messages to stdout (as well as logfile)\n"
   );
 }
 
 void sigint_handler (int dummy) {
+  signal_received = dummy;
   keep_running = 0;
 }
 
@@ -71,11 +74,16 @@ void fill_dummy_obs_doc (ObservationDocument* od)
 int main(int argc, char** argv)
 {
   // register SIGINT handling
-  signal (SIGINT, sigint_handler);
+  //signal (SIGINT, sigint_handler);
+  // TEMPORARY -- handle all signals with quit
+  for (int i=0; i < 15; ++i)
+    signal (i+1, sigint_handler);
 
   uint64_t manual_control_port = 0;
+  int stdout_output = 1;
+
   int arg = 0;
-  while ((arg = getopt(argc, argv, "hm:")) != -1) {
+  while ((arg = getopt(argc, argv, "hom:")) != -1) {
     switch(arg) {
 
     case 'h':
@@ -88,8 +96,13 @@ int main(int argc, char** argv)
         return -1;
       }
       break;
-    }  
-  }
+
+    case 'o':
+      stdout_output = 1;
+      break;
+
+    } // end switch 
+  } // end argument parsing
 
   // check for mandatory configuration file
   if (optind==argc)
@@ -97,7 +110,22 @@ int main(int argc, char** argv)
 
 
   multilog_t* log = multilog_open ("messenger",0);
-  multilog_add (log, stderr);
+  char logfile[128];
+  time_t currt = time (NULL);
+  struct tm tmpt; 
+  localtime_r (&currt, &tmpt);
+  char currt_string[32];
+  strftime (currt_string,sizeof(currt_string), "%Y%m%d_%H%M%S", &tmpt);
+  currt_string[15] = 0;
+  char hostname[MAXHOSTNAME];
+  gethostname (hostname,MAXHOSTNAME);
+  pid_t pid = getpid();
+  snprintf (logfile,128,
+      "%s/%s_%s_messenger_%06d.log",LOGDIR,currt_string,hostname,pid);
+  FILE *logfile_fp = fopen (logfile, "w");
+  multilog_add (log, logfile_fp);
+  if (stdout_output)
+    multilog_add (log, stdout);
 
   int nvconf = 0;
   VFASTConfig** vconf = parse_vfast_config (argv[optind], &nvconf);
@@ -112,7 +140,7 @@ int main(int argc, char** argv)
         print_vfast_config (vconf[iconfig], NULL));
 
   const char cmdstop[] = {CMD_STOP};
-  //const char cmdevent[] = {CMD_EVENT};
+  const char cmdevent[] = {CMD_EVENT};
   const char cmdquit[] = {CMD_QUIT};
   const char cmdstart[] = {CMD_START};
 
@@ -128,20 +156,11 @@ int main(int argc, char** argv)
 
   ScanInfoDocument D; //multicast message struct
   const ObservationDocument *od;
-  const AntPropDocument *ap;
   AlertDocument A; 
 
-  struct timespec ts_100ms;
-  ts_100ms.tv_sec = 0;
-  ts_100ms.tv_nsec = 100000000;
-
-  struct timespec ts_10ms;
-  ts_10ms.tv_sec = 0;
-  ts_10ms.tv_nsec = 10000000;
-
-  struct timespec ts_1ms;
-  ts_1ms.tv_sec = 0;
-  ts_1ms.tv_nsec = 1000000;
+  struct timespec ts_500ms = get_ms_ts (500);
+  struct timespec ts_100ms = get_ms_ts (100);
+  struct timespec ts_10ms = get_ms_ts (10);
 
   char scaninfofile[128];
   //char eventlogfile[] = "eventlog.txt";
@@ -268,7 +287,10 @@ int main(int argc, char** argv)
     //Have to call FS_SET on each socket before calling select()
     FD_ZERO (&readfds);
     if (manual_control_port > 0)
+    {
       FD_SET (mc.rqst, &readfds);
+      FD_SET (obsinfosock, &readfds);
+    }
     else {
       FD_SET (obsinfosock, &readfds);
       FD_SET (antpropsock, &readfds);
@@ -276,6 +298,8 @@ int main(int argc, char** argv)
     }
 
     select (maxnsock+1,&readfds,NULL,NULL,NULL);
+    fflush (stdout);
+    fflush (stderr);
     
     //Obsinfo socket
     if (FD_ISSET (obsinfosock,&readfds)) {
@@ -288,58 +312,73 @@ int main(int argc, char** argv)
       
       parseScanInfoDocument (&D, msg);
       printScanInfoDocument (&D);
-      multilog (log, LOG_INFO,
-          "Message type: %d = %s\n",D.type,ScanInfoTypeString[D.type]);
-      if (D.type == SCANINFO_OBSERVATION) {
-        od = &(D.data.observation);
-        strcpy (src,od->name);
-	
-        sprintf (scaninfofile,"%s/%s.%s.obsinfo.%04d.%04d.txt",
-          OBSINFODIR,od->datasetId,od->name,od->scanNo,od->subscanNo);
 
-        if ((sfd = fopen(scaninfofile,"w")) == NULL) {
-          multilog (log, LOG_ERR, 
-            "Messenger: Could not open file %s for writing.\n",scaninfofile);
-        }
-        else {
-          fprintScanInfoDocument (&D,sfd);
-          fclose (sfd);
-        }
-      
-        // TO ADD: Check that Writers are still connected before sending; change their isonnected elements if they are not
-        if (strcasecmp (src,"FINISH") == 0) {
-          multilog (log, LOG_INFO, "sending STOP command\n");
-          for (int ii=0; ii<nvconf; ++ii) {
-            if (send (cr[ii].svc, cmdstop, 1, 0) == -1)
-              multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
-            if (send (cw[ii].svc, cmdstop, 1, 0) == -1)
-              multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
+      // only do this part if not under manual control
+      if (0==manual_control_port)
+      {
+        multilog (log, LOG_INFO,
+            "Message type: %d = %s\n",D.type,ScanInfoTypeString[D.type]);
+        if (D.type == SCANINFO_OBSERVATION) {
+          od = &(D.data.observation);
+          strcpy (src,od->name);
+    
+          sprintf (scaninfofile,"%s/%s.%s.obsinfo.%04d.%04d.txt",
+            OBSINFODIR,od->datasetId,od->name,od->scanNo,od->subscanNo);
+
+#if 0
+          if ((sfd = fopen(scaninfofile,"w")) == NULL) {
+            multilog (log, LOG_ERR, 
+              "Messenger: Could not open file %s for writing.\n",scaninfofile);
           }
-          recording = 0;
-        }
-        else {
-          // TO ADD: Check that Readers/Writers are still connected before sending; change their isonnected elements if they are not
-          if (recording) {
+          else {
+            // TEMP -- disable obsinfo output
+            fprintScanInfoDocument (&D,sfd);
+            fclose (sfd);
+          }
+#endif
+        
+          // TO ADD: Check that Writers are still connected before sending; change their isonnected elements if they are not
+          if (strcasecmp (src,"FINISH") == 0) {
             multilog (log, LOG_INFO, "sending STOP command\n");
-            for(int ii=0; ii<nvconf; ++ii) {
-              if (send(cw[ii].svc, cmdstop, 1, 0) == -1)
+            for (int ii=0; ii<nvconf; ++ii) {
+              if (send (cr[ii].svc, cmdstop, 1, 0) == -1)
+                multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
+              if (send (cw[ii].svc, cmdstop, 1, 0) == -1)
                 multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
             }
-            // this is empirical, but seems to be long enough to allow
-            // messages to propagate
-            nanosleep(&ts_100ms, NULL);
+            recording = 0;
+            // TEMP -- see if this sleep is helpful
+            nanosleep (&ts_500ms, NULL);
           }
-          multilog (log, LOG_INFO,"sending START command\n");
-          for (int ii=0; ii<nvconf; ++ii) {
-            if (send (cr[ii].svc, cmdstart, 1, 0) == -1)
-              multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
-            if (send (cw[ii].svc, cmdstart, 1, 0) == -1)
-              multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
-            if (send (ci[ii].svc, od, sizeof(ObservationDocument), 0) == -1)
-              multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
+          else {
+            // TO ADD: Check that Readers/Writers are still connected before sending; change their isonnected elements if they are not
+            if (recording) {
+              multilog (log, LOG_INFO, "sending STOP command\n");
+              for(int ii=0; ii<nvconf; ++ii) {
+                if (send(cw[ii].svc, cmdstop, 1, 0) == -1)
+                  multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
+              }
+              // this is empirical, but seems to be long enough to allow
+              // messages to propagate
+              nanosleep (&ts_500ms, NULL);
+            }
+            multilog (log, LOG_INFO,"sending START command\n");
+            for (int ii=0; ii<nvconf; ++ii) {
+              if (send (cr[ii].svc, cmdstart, 1, 0) == -1)
+                multilog (log, LOG_ERR,
+                    "send to reader %d: %s\n", ii+1, strerror (errno));
+              if (send (cw[ii].svc, cmdstart, 1, 0) == -1)
+                multilog (log, LOG_ERR,
+                    "send to writer %d: %s\n", ii+1, strerror (errno));
+              if (send (ci[ii].svc, od, sizeof(ObservationDocument), 0) == -1)
+                multilog (log, LOG_ERR,
+                    "send to info %d: %s\n", ii+1, strerror (errno));
+            }
+            multilog (log, LOG_INFO,"sent START command\n");
+            fflush (stderr); fflush (stdout);
+            nanosleep (&ts_10ms, NULL);
+            recording = 1;
           }
-          nanosleep(&ts_10ms, NULL);
-          recording = 1;
         }
       }
     }
@@ -357,8 +396,11 @@ int main(int argc, char** argv)
       printScanInfoDocument (&D);
       multilog (log, LOG_INFO,
           "Message type: %d = %s\n",D.type,ScanInfoTypeString[D.type]);
+      // TEMP -- disable output of antenna prop logs
+#if 0
       if (D.type == SCANINFO_ANTPROP) {
-        ap = &(D.data.antProp);
+
+        const AntPropDocument* ap = &(D.data.antProp);
 
         sprintf (scaninfofile,"%s/%s.antprop.txt",OBSINFODIR,ap->datasetId);
         sfd = fopen (scaninfofile,"w");
@@ -372,6 +414,7 @@ int main(int argc, char** argv)
           fclose (sfd);
         }
       }
+# endif
     } // end Antprop socket block
 
     //Alert socket
@@ -398,8 +441,9 @@ int main(int argc, char** argv)
     } // end Alert socket block
 
     // Manual control socket
-    if (FD_ISSET (mc.rqst,&readfds)) {
-      char cmd = wait_for_cmd (&mc);
+    if ((manual_control_port > 0) && FD_ISSET (mc.rqst,&readfds)) {
+    //if (FD_ISSET (mc.rqst,&readfds)) {
+      char cmd = wait_for_cmd (&mc, NULL);
       if (cmd == CMD_START) {
         ObservationDocument dummy;
         fill_dummy_obs_doc (&dummy);
@@ -413,6 +457,17 @@ int main(int argc, char** argv)
             multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
         }
       }
+      else if (cmd == CMD_EVENT) {
+        multilog (log, LOG_INFO, "sending manual EVENT command\n");
+        for (int ii=0; ii<nvconf; ++ii) {
+          // send STOP to reader
+          if (send(cr[ii].svc, cmdstop, 1, 0) == -1)
+            multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
+          // send EVENT to writer
+          if (send(cw[ii].svc, cmdevent, 1, 0) == -1)
+            multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
+        }
+      }
       else if (cmd == CMD_STOP) {
         multilog (log, LOG_INFO, "sending STOP command\n");
         for(int ii=0; ii<nvconf; ++ii) {
@@ -422,7 +477,6 @@ int main(int argc, char** argv)
             multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
         }
       }
-
       else if (cmd == CMD_QUIT) {
         multilog (log, LOG_INFO, "breaking from main loop\n");
         break;
@@ -431,9 +485,12 @@ int main(int argc, char** argv)
 
     // TODO -- could have messages from transient detection here
     
-  } //end while
+  } //end main program loop
 
   multilog (log, LOG_INFO, "Shutting down...\n");
+  if (signal_received != 0)
+    multilog (log, LOG_ERR, "received signal %d\n", signal_received+1);
+  fclose (logfile_fp);
 
   // shut down readers
   for (int ii=0; ii<nvconf; ++ii) {
