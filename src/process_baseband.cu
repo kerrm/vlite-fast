@@ -41,6 +41,7 @@ void usage ()
 	  "-w output filterbank data (0=no sources, 1=listed sources, 2=all sources [def])\n"
 	  "-b reduce output to b bits (2 [def], 4, and 8 are supported))\n"
 	  "-P number of output polarizations (1=AA+BB, 2=AA,BB; 4 not implemented)\n"
+	  "-r RFI-excision mode (0=no excision, 1=only excision, 2=[default]write both data sets)\n"
     "-s process a single observation, then quit (used for debugging)\n"
 	  //"-m retain MUOS band\n"
 	  ,(uint64_t)READER_SERVICE_PORT);
@@ -69,7 +70,7 @@ int write_psrdada_header (dada_hdu_t* hdu, char* inchdr, int npol, char* fb_file
 {
 
   // handle values from incoming header; set defaults if not available
-  short int station_id = 0;
+  int station_id = 0;
   ascii_header_get (inchdr, "STATIONID", "%d", &station_id);
   double ra = 0;
   ascii_header_get (inchdr, "RA", "%lf", &ra);
@@ -117,7 +118,7 @@ int write_psrdada_header (dada_hdu_t* hdu, char* inchdr, int npol, char* fb_file
 int write_sigproc_header (FILE* output_fp, char* inchdr, vdif_header* vdhdr,int npol)
 {
   // handle values from incoming header; set defaults if not available
-  short int station_id = 0;
+  int station_id = 0;
   ascii_header_get (inchdr, "STATIONID", "%d", &station_id);
   double ra = 0;
   ascii_header_get (inchdr, "RA", "%lf", &ra);
@@ -164,7 +165,7 @@ int write_sigproc_header (FILE* output_fp, char* inchdr, vdif_header* vdhdr,int 
 void get_fbfile (char* fbfile, ssize_t fbfile_len, char* inchdr, vdif_header* vdhdr)
 {
   // Open up filterbank file using timestamp and antenna
-  short int station_id = 0;
+  int station_id = 0;
   ascii_header_get (inchdr, "STATIONID", "%d", &station_id);
   char currt_string[128];
   struct tm tm_epoch = {0};
@@ -173,7 +174,7 @@ void get_fbfile (char* fbfile, ssize_t fbfile_len, char* inchdr, vdif_header* vd
   tm_epoch.tm_mon = 6*(vdif_epoch%2);
   time_t epoch_seconds = mktime (&tm_epoch) + getVDIFFrameEpochSecOffset (vdhdr);
   struct tm* utc_time = gmtime (&epoch_seconds);
-  strftime(currt_string,sizeof(currt_string), "%Y%m%d_%H%M%S", utc_time);
+  strftime (currt_string,sizeof(currt_string), "%Y%m%d_%H%M%S", utc_time);
   *(currt_string+15) = 0;
   if (CHANMIN < 2411)
     snprintf (fbfile,fbfile_len,"%s/%s_muos_ea%02d.fil",DATADIR,currt_string,station_id);
@@ -193,11 +194,12 @@ int main (int argc, char *argv[])
   int stdout_output = 0;
   int write_fb = 2;
   int npol = 1;
+  int RFI_MODE=2;
   int major_skip = 0;
   int single_pass = 0;  
 
   int arg = 0;
-  while ((arg = getopt(argc, argv, "hk:K:p:omw:b:P:s")) != -1) {
+  while ((arg = getopt(argc, argv, "hk:K:p:omw:b:P:r:s")) != -1) {
 
     switch (arg) {
 
@@ -254,6 +256,18 @@ int main (int argc, char *argv[])
       }
       break;
 
+    case 'r':
+      if (sscanf (optarg, "%d", &RFI_MODE) != 1) {
+        fprintf (stderr, "writer: could not parse RFI mode %s\n", optarg);
+        return -1;
+      }
+      if ( (RFI_MODE < 0) || (RFI_MODE > 2) )
+      {
+        fprintf (stderr, "Unsupported RFI mode!\n");
+        return -1;
+      }
+      break;
+
     case 'P':
       if (sscanf (optarg, "%d", &npol) != 1) {
         fprintf (stderr, "writer: could not parse number of pols %s\n", optarg);
@@ -279,7 +293,7 @@ int main (int argc, char *argv[])
   struct timespec ts_1ms = get_ms_ts (1);
   struct timespec ts_10s = get_ms_ts (10000);
 
-  #ifdef PROFILE
+  #if PROFILE
   // support for measuring run times of parts
   cudaEvent_t start,stop,start_total,stop_total;
   cudaEventCreate (&start);
@@ -318,7 +332,7 @@ int main (int argc, char *argv[])
 
   // log configuration parameters
   char incoming_hdr[4096]; // borrow this buffer
-  strncpy (incoming_hdr, argv[0], sizeof(incoming_hdr)-2);
+  strncpy (incoming_hdr, argv[0], sizeof(incoming_hdr)-1);
   for (int i = 1; i < argc; ++i) {
     strcat (incoming_hdr, " ");
     strncat (incoming_hdr, argv[i], 4095-strlen(incoming_hdr));
@@ -355,7 +369,7 @@ int main (int argc, char *argv[])
     }
   }
 
-  #ifdef PROFILE
+  #if PROFILE
   cudaEventRecord(start,0);
   #endif
   
@@ -369,7 +383,7 @@ int main (int argc, char *argv[])
   cudaMalloc ((void**)&udat_dev,2*VLITE_RATE/SEG_PER_SEC) );
 
   #if DOHISTO
-  // device memory for sample histograms
+  // memory for sample histograms
   unsigned int* histo_dev; cudacheck (
   cudaMalloc ((void**)&histo_dev,2*256*sizeof(unsigned int)) );
   unsigned int* histo_hst; cudacheck (
@@ -384,50 +398,48 @@ int main (int argc, char *argv[])
   cufftHandle plan;
   cufftcheck (cufftPlan1d (&plan,NFFT,CUFFT_R2C,fft_per_chunk));
 
+  // memory for FFTs
   cufftReal* fft_in; cudacheck (
   cudaMalloc ((void**)&fft_in,sizeof(cufftReal)*samps_per_chunk) );
-
   cufftComplex* fft_out; cudacheck (
   cudaMalloc ((void**)&fft_out,sizeof(cufftComplex)*fft_per_chunk*NCHAN) );
-
-  #if DOKURTO
-  // parallel memory stream for kurtosis-zapped data
-  cufftReal* fft_in_kur; cudacheck (
-  cudaMalloc ((void**)&fft_in_kur,sizeof(cufftReal)*samps_per_chunk) );
-
-  cufftComplex* fft_out_kur; cudacheck (
-  cudaMalloc ((void**)&fft_out_kur,sizeof(cufftComplex)*fft_per_chunk*NCHAN) );
+  // if RFI_MODE==1, just use the same buffers; otherwise, duplicate
+  cufftReal* fft_in_kur = fft_in;
+  if (2 == RFI_MODE)
+    cudacheck ( cudaMalloc (
+      (void**)&fft_in_kur, sizeof(cufftReal)*samps_per_chunk) );
+  cufftComplex* fft_out_kur = fft_out;
+  if (2 == RFI_MODE)
+    cudacheck ( cudaMalloc (
+      (void**)&fft_out_kur, sizeof(cufftComplex)*fft_per_chunk*NCHAN) );
 
   // device memory for kurtosis statistics, uses NKURTO samples
   // NKURTO must be commensurate with samps_per_chunk/2
   size_t nkurto_per_chunk = samps_per_chunk / NKURTO;
 
   // extra factor of 2 to store both power and kurtosis statistics
-  cufftReal* kur_dev; cudacheck (
+  // storage for high time resolution and filterbank block ("fb") scales
+  cufftReal* kur_dev=NULL; if (RFI_MODE) cudacheck (
   cudaMalloc ((void**)&kur_dev,2*sizeof(cufftReal)*nkurto_per_chunk) );
-  #if WRITE_KURTO
-  cufftReal* kur_hst; cudacheck (
-  cudaMallocHost ((void**)&kur_hst,2*sizeof(cufftReal)*nkurto_per_chunk));
-  #endif
-
-  // store power and kurtosis statistics for each filterbank  block
-  cufftReal* kur_fb_dev; cudacheck (
+  cufftReal* kur_fb_dev=NULL; if (RFI_MODE) cudacheck (
   cudaMalloc ((void**)&kur_fb_dev,2*sizeof(cufftReal)*fft_per_chunk) );
-  #if WRITE_KURTO
-  cufftReal* kur_fb_hst; cudacheck (
-  cudaMallocHost ((void**)&kur_fb_hst,2*sizeof(cufftReal)*fft_per_chunk) );
-  #endif
 
   // store D'Agostino statistic for thresholding
-  cufftReal* dag_dev; cudacheck (
+  cufftReal* dag_dev=NULL; if (RFI_MODE) cudacheck (
   cudaMalloc ((void**)&dag_dev,sizeof(cufftReal)*nkurto_per_chunk) );
-
-  cufftReal* dag_fb_dev; cudacheck (
+  cufftReal* dag_fb_dev=NULL; if (RFI_MODE) cudacheck (
   cudaMalloc ((void**)&dag_fb_dev,sizeof(cufftReal)*fft_per_chunk) );
 
   // store a set of to re-normalize voltages after applying kurtosis
-  cufftReal* kur_weights_dev; cudacheck (
+  cufftReal* kur_weights_dev=NULL; if (RFI_MODE) cudacheck (
   cudaMalloc ((void**)&kur_weights_dev,sizeof(cufftReal)*fft_per_chunk) );
+
+  #if WRITE_KURTO
+  // storage on host if writing out kurtosis statistics
+  cufftReal* kur_hst; cudacheck (
+  cudaMallocHost ((void**)&kur_hst,2*sizeof(cufftReal)*nkurto_per_chunk));
+  cufftReal* kur_fb_hst; cudacheck (
+  cudaMallocHost ((void**)&kur_fb_hst,2*sizeof(cufftReal)*fft_per_chunk) );
   cufftReal* kur_weights_hst; cudacheck (
   cudaMallocHost ((void**)&kur_weights_hst,sizeof(cufftReal)*fft_per_chunk) );
   #endif
@@ -438,10 +450,10 @@ int main (int argc, char *argv[])
   int scrunch = (fft_per_chunk*NCHAN)/(polfac*NSCRUNCH);
   cufftReal* fft_ave; cudacheck (
   cudaMalloc ((void**)&fft_ave,sizeof(cufftReal)*scrunch) );
-  #if DOKURTO
-  cufftReal* fft_ave_kur; cudacheck (
-  cudaMalloc ((void**)&fft_ave_kur,sizeof(cufftReal)*scrunch) );
-  #endif
+  cufftReal* fft_ave_kur=fft_ave;
+  if (2 == RFI_MODE)
+    cudacheck ( cudaMalloc (
+        (void**)&fft_ave_kur,sizeof(cufftReal)*scrunch) );
 
   // error check that NBIT is commensurate with trimmed array size
   int trim = (fft_per_chunk*(CHANMAX-CHANMIN+1))/(polfac*NSCRUNCH);
@@ -455,28 +467,29 @@ int main (int argc, char *argv[])
   trim /= (8/NBIT);
   unsigned char* fft_trim_u; cudacheck (
   cudaMalloc ((void**)&fft_trim_u,trim) );
+  unsigned char* fft_trim_u_hst; cudacheck (
+  cudaMallocHost ((void**)&fft_trim_u_hst,trim) );
 
-  unsigned char* fft_trim_u_host; cudacheck (
-  cudaMallocHost ((void**)&fft_trim_u_host,trim) );
-
-  #if DOKURTO
-  unsigned char* fft_trim_u_kur; cudacheck (
-  cudaMalloc ((void**)&fft_trim_u_kur,trim) );
-  unsigned char* fft_trim_u_kur_host; cudacheck (
-  cudaMallocHost ((void**)&fft_trim_u_kur_host,trim) );
-  #endif
+  unsigned char* fft_trim_u_kur=fft_trim_u;
+  if (2 == RFI_MODE)
+    cudacheck (cudaMalloc ((void**)&fft_trim_u_kur,trim) );
+  unsigned char* fft_trim_u_kur_hst=fft_trim_u_hst;
+  if (2 == RFI_MODE)
+    cudacheck (cudaMallocHost ((void**)&fft_trim_u_kur_hst,trim) );
 
   // memory for running bandpass correction; 2 pol * NCHAN
   cufftReal* bp_dev; cudacheck (
   cudaMalloc ((void**)&bp_dev,sizeof(cufftReal)*NCHAN*2));
   cudacheck (cudaMemset (bp_dev, 0, sizeof(cufftReal)*NCHAN*2));
-  #if DOKURTO
-  cufftReal* bp_kur_dev; cudacheck (
-  cudaMalloc ((void**)&bp_kur_dev,sizeof(cufftReal)*NCHAN*2));
-  cudacheck (cudaMemset (bp_kur_dev, 0, sizeof(cufftReal)*NCHAN*2));
-  #endif
+  cufftReal* bp_kur_dev = bp_dev;
+  if (2 == RFI_MODE )
+  {
+    cudacheck (cudaMalloc (
+        (void**)&bp_kur_dev,sizeof(cufftReal)*NCHAN*2));
+    cudacheck (cudaMemset (bp_kur_dev, 0, sizeof(cufftReal)*NCHAN*2));
+  }
 
-  #ifdef PROFILE
+  #if PROFILE
   CUDA_PROFILE_STOP(start,stop,&alloc_time)
   #endif
 
@@ -532,6 +545,7 @@ int main (int argc, char *argv[])
   // an observation
   uint64_t hdr_size = 0;
   char* ascii_hdr = ipcbuf_get_next_read (hdu_in->header_block,&hdr_size);
+  multilog (log, LOG_INFO, "Received header with size %d.\n", hdr_size);
 
   if (ascii_hdr == NULL) {
     // this could be an error condition, or it could be a result of 
@@ -567,34 +581,22 @@ int main (int argc, char *argv[])
 
   int bad_packets = 0;
   int skip_observation = 1;
+  int frames_in_order[2] = {0,0};
+  int last_sample[2] = {-1,-1};
+
   // consume from the buffer until we reach 1-s boundary
-  for (int i=0; i < VLITE_FRAME_RATE*2; ++i)
+
+  // change this to consume until we reach 1-s boundary AND the previous
+  // 1s of data are contiguous; this will hopefully prevent problems with
+  // packet loss; if we haven't achieved a good chunk after 10 "seconds"
+  // worth of packets, abort the observation
+  for (int i=0; i < VLITE_FRAME_RATE*20; ++i)
   {
-
     ssize_t nread = ipcio_read (hdu_in->data_block,frame_buff,VD_FRM);
-
     if (nread != VD_FRM)
     {
       bad_packets++;
-      // this will skip the short data segment and move to the next "observation"
-      // TODO -- not sure why this sleep is in here, do we need it?
-      nanosleep (&ts_1ms,NULL);
       continue;
-    }
-    if (i==0)
-    {
-      int sample = getVDIFFrameNumber(vdhdr);
-      int current_sec = getVDIFFrameSecond(vdhdr);
-      multilog (log, LOG_INFO, 
-        "Starting trim at frame %d and second %d.\n",sample,current_sec);
-    }
-    if (i==(2*VLITE_FRAME_RATE-1))
-    {
-      int sample = getVDIFFrameNumber(vdhdr);
-      int current_sec = getVDIFFrameSecond(vdhdr);
-      multilog (log, LOG_INFO, 
-        "Ending unsuccessfully at frame %d and second %d.\n",
-        sample,current_sec);
     }
     if (nread < 0)
     {
@@ -602,13 +604,33 @@ int main (int argc, char *argv[])
       skip_observation = 1;
       break;
     }
-    int sample = getVDIFFrameNumber(vdhdr);
-    if (sample==0)
+    if (0==i)
+      multilog (log, LOG_INFO,"Starting trim at frame %d and second %d.\n",
+          getVDIFFrameNumber(vdhdr),getVDIFFrameSecond(vdhdr));
+
+    int thread = getVDIFThreadID (vdhdr) != 0;
+    int sample = getVDIFFrameNumber (vdhdr);
+
+    // at the beginning of a second, check for contiguity
+    if (0==sample)
     {
-      skip_observation = 0;
-      break;
+      // we have passed through and have acquired a full second of data
+      if ((VLITE_FRAME_RATE-1)==frames_in_order[0] &&
+          (VLITE_FRAME_RATE-1)==frames_in_order[1])
+      {
+        skip_observation = 0;
+        break;
+      }
+      else
+        frames_in_order[thread] = 0;
     }
+    else if (sample==last_sample[thread]+1)
+      frames_in_order[thread]++;
+
+    last_sample[thread] = sample;
+
   }
+  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
 
   if (bad_packets > 0)
     multilog (log, LOG_INFO,
@@ -621,24 +643,27 @@ int main (int argc, char *argv[])
     continue;
   }
 
-  // set up "previous" samples and copy first frame into 1s-buffer
-  int current_sec = getVDIFFrameSecond(vdhdr);
-  int current_sample[2] = {-1,-1};
-  int current_thread = getVDIFThreadID (vdhdr) != 0;
-  multilog (log, LOG_INFO, "Starting sec=%d, thread=%d\n",current_sec,current_thread);
+  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
+  nanosleep (&ts_1ms,NULL);
+  nanosleep (&ts_1ms,NULL);
+  nanosleep (&ts_1ms,NULL);
+  nanosleep (&ts_1ms,NULL);
+  nanosleep (&ts_1ms,NULL);
+  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
 
   // Open up filterbank file at appropriate time
   char fbfile[256];
+  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
   get_fbfile (fbfile, 256, incoming_hdr, vdhdr);
+  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
+  char fbfile_kur[256];
+  change_extension (fbfile, fbfile_kur, ".fil", "_kur.fil");
 
   // use same scheme for ancillary data files
   #if DOHISTO
   char histofile[256] = "";
   change_extension (fbfile, histofile, ".fil", ".histo");
   #endif
-  #if DOKURTO
-  char fb_kurtofile[256] = "";
-  change_extension (fbfile, fb_kurtofile, ".fil", "_kur.fil");
   #if WRITE_KURTO
   char kurtofile[256] = "";
   change_extension (fbfile, kurtofile, ".fil", ".kurto");
@@ -647,15 +672,7 @@ int main (int argc, char *argv[])
   char weightfile[256] = "";
   change_extension (fbfile, weightfile, ".fil", ".weights");
   #endif
-  #endif
-
-  // file name for psrdada header (copy in case writing to /dev/null)
-  char heimdall_file[256];
-  #if DOKURTO
-  strncpy (heimdall_file, fb_kurtofile, 255);
-  #else
-  strncpy (heimdall_file, fbfile, 255);
-  #endif
+  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
 
   // check for write to /dev/null
   int write_to_null =  0==write_fb;
@@ -679,33 +696,47 @@ int main (int argc, char *argv[])
   {
     multilog (log, LOG_INFO,
         "Filterbank output disabled.  Would have written to %s.\n",fbfile);
-    strncpy (fbfile,"/dev/null",256); 
+    strncpy (fbfile,"/dev/null",255); 
     #if DOHISTO
-    strncpy (histofile,"/dev/null",256); 
+    strncpy (histofile,"/dev/null",255); 
     #endif
-    #if DOKURTO
-    strncpy (fb_kurtofile,"/dev/null",256); 
-    #if WRITE_KURTO
-    strncpy (kurtofile,"/dev/null",256); 
-    strncpy (block_kurtofile,"/dev/null",256); 
-    strncpy (weightfile,"/dev/null",256); 
-    #endif
+    if (RFI_MODE)
+      strncpy (fbfile_kur,"/dev/null",255); 
+    #if WRITE_KURT0
+      strncpy (kurtofile,"/dev/null",255); 
+      strncpy (block_kurtofile,"/dev/null",255); 
+      strncpy (weightfile,"/dev/null",255); 
     #endif
   }
+  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
 
-  FILE *fb_fp = myopen (fbfile, "wb", true);
-  multilog (log, LOG_INFO, "Writing data to %s.\n",fbfile);
+  FILE *fb_fp,*fb_kurto_fp=NULL;
   uint64_t fb_bytes_written = 0;
+  if (RFI_MODE == 0 || RFI_MODE == 2 )
+  {
+    fb_fp = myopen (fbfile, "wb", true);
+    multilog (log, LOG_INFO,
+        "Writing no-RFI-excision filterbanks to %s.\n",fbfile);
+  }
+  else
+  {
+    fb_fp = myopen (fbfile_kur, "wb", true);
+    multilog (log, LOG_INFO,
+        "Writing RFI-excision filterbanks to %s.\n",fbfile_kur);
+  }
+  if (RFI_MODE == 2)
+  {
+    fb_kurto_fp = myopen (fbfile_kur, "wb", true);
+    multilog (log, LOG_INFO,
+        "Writing RFI-excision filterbanks to %s.\n",fbfile_kur);
+  }
+  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
 
   #if DOHISTO
   FILE *histo_fp = myopen (histofile, "wb", true);
   multilog (log, LOG_INFO, "Writing histograms to %s.\n",histofile);
   #endif
 
-  #if DOKURTO
-  FILE *fb_kurto_fp = myopen (fb_kurtofile, "wb", true);
-  multilog (
-      log, LOG_INFO, "Writing kurtosis filterbanks to %s.\n",fb_kurtofile);
   #if WRITE_KURTO
   FILE *kurto_fp = myopen (kurtofile, "wb", true);
   multilog (log, LOG_INFO, "Writing kurtosis to %s.\n",kurtofile);
@@ -715,36 +746,44 @@ int main (int argc, char *argv[])
   FILE *weight_fp = myopen (weightfile, "wb", true);
   multilog (log, LOG_INFO, "Writing weights to %s.\n",weightfile);
   #endif
-  #endif
   fflush (logfile_fp);
+  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
 
-  #ifdef PROFILE
+  #if PROFILE
   cudaEventRecord(start,0);
   #endif
 
-  if (key_out) {
+  if (key_out)
     //Write psrdada output header values
-    write_psrdada_header (hdu_out, incoming_hdr, npol, heimdall_file);
-  }
+    write_psrdada_header (hdu_out, incoming_hdr, npol, 
+      RFI_MODE?fbfile_kur:fbfile);
+  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
 
   // write out a sigproc header
   write_sigproc_header (fb_fp, incoming_hdr, vdhdr, npol);
-  #if DOKURTO
-  write_sigproc_header (fb_kurto_fp, incoming_hdr, vdhdr, npol);
-  #endif
+  if (2 == RFI_MODE)
+    write_sigproc_header (fb_kurto_fp, incoming_hdr, vdhdr, npol);
+  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
 
-  #ifdef PROFILE
+  #if PROFILE
   CUDA_PROFILE_STOP(start,stop,&hdr_time)
   #endif
 
   // launch heimdall
-  FILE* heimdall_fp;
+  FILE* heimdall_fp=NULL;
   if (key_out) {
     char heimdall_cmd[256];
     snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 62500 -gpu_id 0 -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -k %x -v", key_out); 
     multilog (log, LOG_INFO, "%s\n", heimdall_cmd);
     heimdall_fp = popen (heimdall_cmd, "r");
   }
+  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
+
+  // set up sample# trackers and copy first frame into 1s-buffer
+  int current_sec = getVDIFFrameSecond(vdhdr);
+  last_sample[0] = last_sample[1] = -1;
+  int current_thread = getVDIFThreadID (vdhdr) != 0;
+  multilog (log, LOG_INFO, "Starting sec=%d, thread=%d\n",current_sec,current_thread);
 
   bool skipped_data_announced = false;
 
@@ -757,7 +796,7 @@ int main (int argc, char *argv[])
     if (second==current_sec || major_skip)
     {
 
-      #ifdef PROFILE
+      #if PROFILE
       cudaEventRecord (start,0);
       #endif 
 
@@ -765,7 +804,7 @@ int main (int argc, char *argv[])
       memcpy (udat + idx,dat,VD_DAT);
 
       // check for skipped data
-      if (sample!=current_sample[thread] + 1)
+      if (sample!=last_sample[thread] + 1)
       {
         if (!skipped_data_announced) {
           multilog (log, LOG_INFO, "Found skipped data in current second!\n");
@@ -774,15 +813,15 @@ int main (int argc, char *argv[])
         // set the intervening memory to zeros
         // TODO -- not sure this is correct, and not sure what to set
         // memory to, if anything; probably should just abort
-        //idx = VLITE_RATE*thread + (current_sample[thread]+1)*VD_DAT;
-        //memset (udat+idx,0,VD_DAT*(sample-current_sample[thread]-1));
+        //idx = VLITE_RATE*thread + (last_sample[thread]+1)*VD_DAT;
+        //memset (udat+idx,0,VD_DAT*(sample-last_sample[thread]-1));
       }
-      current_sample[thread] = sample;
+      last_sample[thread] = sample;
 
       // read the next frame into the buffer
       ssize_t nread = ipcio_read (hdu_in->data_block,frame_buff,VD_FRM);
 
-#ifdef PROFILE
+#if PROFILE
       CUDA_PROFILE_STOP(start,stop,&elapsed)
       read_time += elapsed;
 #endif
@@ -841,26 +880,28 @@ int main (int argc, char *argv[])
     current_sec = second;
 
     // need to dispatch the current buffer; zero fill any discontinuity
-    // at the end
+    // at the end; TODO is this redundant?  Already checking for skipped
+    // data; I guess at this point we might have more of an idea about the
+    // magnitude of a skip
     for (int i = 0; i < 2; ++i)
     {
       int target = VLITE_FRAME_RATE - 1;
-      if (current_sample[i] !=  target)
+      if (last_sample[i] !=  target)
       {
         multilog (log, LOG_ERR,
           "Found skipped data in dispatch!  Aborting this observation.\n");
-        //size_t idx = VLITE_RATE*i + current_sample[i]*VD_DAT;
-        //memset(udat+idx,0,(target-current_sample[i])*VD_DAT);
+        //size_t idx = VLITE_RATE*i + last_sample[i]*VD_DAT;
+        //memset(udat+idx,0,(target-last_sample[i])*VD_DAT);
         break;
       }
-      current_sample[i] = -1;
+      last_sample[i] = -1;
     }
 
     // do dispatch -- break into chunks to fit in GPU memory
     for (int iseg = 0; iseg < SEG_PER_SEC; iseg++)
     {
 
-      #ifdef PROFILE
+      #if PROFILE
       cudaEventRecord(start,0);
       #endif 
       // need to copy pols separately
@@ -870,14 +911,14 @@ int main (int argc, char *argv[])
         unsigned char* src = udat + ipol*VLITE_RATE + iseg*samps_per_chunk/2;
         cudacheck (cudaMemcpy (dst,src,samps_per_chunk/2,cudaMemcpyHostToDevice) );
       }
-      #ifdef PROFILE
+      #if PROFILE
       CUDA_PROFILE_STOP(start,stop,&elapsed)
       todev_time += elapsed;
       #endif
 
       ////// HISTOGRAM //////
       #if DOHISTO
-      #ifdef PROFILE
+      #if PROFILE
       cudaEventRecord (start,0);
       #endif 
       // compute sample histogram
@@ -885,169 +926,197 @@ int main (int argc, char *argv[])
       cudacheck (cudaMemset (histo_dev,0,2*256*sizeof(unsigned int)));
       histogram <<<nsms*32,512>>> (udat_dev,histo_dev,samps_per_chunk);
       cudacheck (cudaGetLastError () );
-      #ifdef PROFILE
+      #if PROFILE
       CUDA_PROFILE_STOP(start,stop,&elapsed)
       histo_time += elapsed;
       #endif
       #endif
 
       ////// CONVERT UINTS to FLOATS //////
-      #ifdef PROFILE
+      #if PROFILE
       cudaEventRecord (start,0);
       #endif 
       convertarray <<<nsms*32,NTHREAD>>> (fft_in,udat_dev,samps_per_chunk);
       cudacheck (cudaGetLastError () );
-      #ifdef PROFILE
+      #if PROFILE
       CUDA_PROFILE_STOP(start,stop,&elapsed)
       convert_time += elapsed;
       #endif
 
       ////// CALCULATE KURTOSIS STATISTICS //////
-      #if DOKURTO
-      #ifdef PROFILE
-      cudaEventRecord (start,0);
-      #endif
-      //multilog (log, LOG_INFO, "calling kurtosis\n");
-      //fflush (logfile_fp);
-      kurtosis <<<nkurto_per_chunk, 256>>> (fft_in,kur_dev,kur_dev+nkurto_per_chunk);
-      cudacheck (cudaGetLastError () );
+      if (RFI_MODE)
+      {
+        #if PROFILE
+        cudaEventRecord (start,0);
+        #endif
 
-      // compute the thresholding statistic
-      compute_dagostino <<<nsms*32,NTHREAD>>> (kur_dev+nkurto_per_chunk,dag_dev,nkurto_per_chunk);
-      cudacheck (cudaGetLastError () );
+        kurtosis <<<nkurto_per_chunk, 256>>> (
+            fft_in,kur_dev,kur_dev+nkurto_per_chunk);
+        cudacheck (cudaGetLastError () );
 
-      // do the same for block level
-      block_kurtosis <<<fft_per_chunk/8,256>>> (kur_dev,kur_dev+nkurto_per_chunk,dag_dev,kur_fb_dev,kur_fb_dev+fft_per_chunk);
-      cudacheck (cudaGetLastError () );
-      compute_dagostino2 <<<nsms*32,NTHREAD>>> (kur_fb_dev+fft_per_chunk,dag_fb_dev,fft_per_chunk);
-      cudacheck (cudaGetLastError () );
+        // compute the thresholding statistic
+        compute_dagostino <<<nsms*32,NTHREAD>>> (
+            kur_dev+nkurto_per_chunk,dag_dev,nkurto_per_chunk);
+        cudacheck (cudaGetLastError () );
 
-      cudacheck (cudaMemset (kur_weights_dev,0,sizeof(cufftReal)*fft_per_chunk) );
-      apply_kurtosis <<<nkurto_per_chunk, 256>>> (fft_in,fft_in_kur,dag_dev,dag_fb_dev,kur_weights_dev);
-      cudacheck (cudaGetLastError () );
-      #if WRITE_KURTO
-      cudacheck (cudaMemcpy (kur_weights_hst, kur_weights_dev, sizeof(cufftReal)*fft_per_chunk, cudaMemcpyDeviceToHost) );
-      #endif
-      //multilog (log, LOG_INFO, "called kurtosis\n");
-      //fflush (logfile_fp);
-      #ifdef PROFILE
-      CUDA_PROFILE_STOP(start,stop,&elapsed)
-      kurtosis_time += elapsed;
-      #endif
-      #endif
+        // do the same for block level
+        block_kurtosis <<<fft_per_chunk/8,256>>> (
+            kur_dev,kur_dev+nkurto_per_chunk,dag_dev,
+            kur_fb_dev,kur_fb_dev+fft_per_chunk);
+        cudacheck (cudaGetLastError () );
+        compute_dagostino2 <<<nsms*32,NTHREAD>>> (
+            kur_fb_dev+fft_per_chunk,dag_fb_dev,fft_per_chunk);
+        cudacheck (cudaGetLastError () );
+
+        cudacheck (cudaMemset (
+            kur_weights_dev,0,sizeof(cufftReal)*fft_per_chunk) );
+        // NB that fft_in_kur==fft_in if not writing both streams
+        apply_kurtosis <<<nkurto_per_chunk, 256>>> (
+            fft_in,fft_in_kur,dag_dev,dag_fb_dev,kur_weights_dev);
+        cudacheck (cudaGetLastError () );
+
+        #if WRITE_KURTO
+        cudacheck (cudaMemcpy (
+            kur_weights_hst, kur_weights_dev, 
+            sizeof(cufftReal)*fft_per_chunk, cudaMemcpyDeviceToHost) );
+        #endif
+
+        #if PROFILE
+        CUDA_PROFILE_STOP(start,stop,&elapsed)
+        kurtosis_time += elapsed;
+        #endif
+      }
 
       ////// PERFORM FFTs //////
-      #ifdef PROFILE
+      #if PROFILE
       cudaEventRecord (start,0);
       #endif 
       cufftcheck (cufftExecR2C (plan,fft_in,fft_out) );
-      #if DOKURTO
-      cufftcheck (cufftExecR2C (plan,fft_in_kur,fft_out_kur) );
-      #endif
-      #ifdef PROFILE
+      if (RFI_MODE > 1)
+        cufftcheck (cufftExecR2C (plan,fft_in_kur,fft_out_kur) );
+      #if PROFILE
       CUDA_PROFILE_STOP(start,stop,&elapsed)
       fft_time += elapsed;
       #endif
 
       ////// NORMALIZE BANDPASS //////
-      #ifdef PROFILE
+      #if PROFILE
       cudaEventRecord(start,0);
       #endif 
-      //detect_and_normalize <<<(NCHAN*2)/NTHREAD+1,NTHREAD>>> (fft_out,fft_per_chunk/2);
-      detect_and_normalize2 <<<(NCHAN*2)/NTHREAD+1,NTHREAD>>> (fft_out,bp_dev,bp_scale,fft_per_chunk/2);
-      cudacheck ( cudaGetLastError () );
-      #if DOKURTO
-      detect_and_normalize3 <<<(NCHAN*2)/NTHREAD+1,NTHREAD>>> (fft_out_kur,kur_weights_dev,bp_kur_dev,bp_scale,fft_per_chunk/2);
-      cudacheck ( cudaGetLastError () );
-      #endif
-      #ifdef PROFILE
+      if (RFI_MODE == 0 || RFI_MODE == 2)
+      {
+        detect_and_normalize2 <<<(NCHAN*2)/NTHREAD+1,NTHREAD>>> (
+            fft_out,bp_dev,bp_scale,fft_per_chunk/2);
+        cudacheck ( cudaGetLastError () );
+      }
+      if (RFI_MODE == 1 || RFI_MODE == 2)
+      {
+        detect_and_normalize3 <<<(NCHAN*2)/NTHREAD+1,NTHREAD>>> (
+            fft_out_kur,kur_weights_dev,bp_kur_dev,bp_scale,
+            fft_per_chunk/2);
+        cudacheck ( cudaGetLastError () );
+      }
+      #if PROFILE
       CUDA_PROFILE_STOP(start,stop,&elapsed)
       normalize_time += elapsed;
       #endif
 
       ////// [OPTIONALLY] ADD POLARIZATIONS //////
-      #ifdef PROFILE
+      #if PROFILE
       cudaEventRecord (start,0);
       #endif 
       size_t maxn = (fft_per_chunk*NCHAN)/polfac;
       if (npol==1) {
-        pscrunch <<<nsms*32,NTHREAD>>> (fft_out,maxn);
-        cudacheck ( cudaGetLastError () );
-        #if DOKURTO
-        pscrunch_weights <<<nsms*32,NTHREAD>>> (fft_out_kur,kur_weights_dev,maxn);
-        cudacheck ( cudaGetLastError () );
-        #endif
+        if (RFI_MODE == 0 || RFI_MODE == 2)
+        {
+          pscrunch <<<nsms*32,NTHREAD>>> (fft_out,maxn);
+          cudacheck ( cudaGetLastError () );
+        }
+        if (RFI_MODE == 1 || RFI_MODE == 2)
+        {
+          pscrunch_weights <<<nsms*32,NTHREAD>>> (
+              fft_out_kur,kur_weights_dev,maxn);
+          cudacheck ( cudaGetLastError () );
+        }
       }
-      #ifdef PROFILE
+      #if PROFILE
       CUDA_PROFILE_STOP(start,stop,&elapsed)
       pscrunch_time += elapsed;
       #endif
 
       ////// AVERAGE TIME DOMAIN //////
-      #ifdef PROFILE
+      #if PROFILE
       cudaEventRecord( start,0);
       #endif 
       maxn /= NSCRUNCH;
-      tscrunch <<<nsms*32,NTHREAD>>> (fft_out,fft_ave,maxn);
-      cudacheck ( cudaGetLastError () );
-      #if DOKURTO
-      tscrunch_weights <<<nsms*32,NTHREAD>>> (fft_out_kur,fft_ave_kur,kur_weights_dev,maxn);
-      cudacheck ( cudaGetLastError () );
-      #endif
-      #ifdef PROFILE
+      if (RFI_MODE == 0 || RFI_MODE == 2)
+      {
+        tscrunch <<<nsms*32,NTHREAD>>> (fft_out,fft_ave,maxn);
+        cudacheck ( cudaGetLastError () );
+      }
+      if (RFI_MODE == 1 || RFI_MODE == 2)
+      {
+        tscrunch_weights <<<nsms*32,NTHREAD>>> (
+            fft_out_kur,fft_ave_kur,kur_weights_dev,maxn);
+        cudacheck ( cudaGetLastError () );
+      }
+      #if PROFILE
       CUDA_PROFILE_STOP(start,stop,&elapsed)
       tscrunch_time += elapsed;
       #endif
 
       ////// TRIM CHANNELS AND DIGITIZE //////
-      #ifdef PROFILE
+      #if PROFILE
       cudaEventRecord (start,0);
       #endif 
       maxn = (CHANMAX-CHANMIN+1)*(maxn/NCHAN)/(8/NBIT);
       switch (NBIT)
       {
         case 2:
-          sel_and_dig_2b <<<nsms*32,NTHREAD>>> (fft_ave,fft_trim_u,maxn, npol);
-          #if DOKURTO
-          sel_and_dig_2b <<<nsms*32,NTHREAD>>> (fft_ave_kur,fft_trim_u_kur,maxn, npol);
-          #endif
+          sel_and_dig_2b <<<nsms*32,NTHREAD>>> (
+              fft_ave,fft_trim_u,maxn, npol);
+          if (RFI_MODE > 1)
+            sel_and_dig_2b <<<nsms*32,NTHREAD>>> (
+                fft_ave_kur,fft_trim_u_kur,maxn, npol);
           break;
         case 4:
-          sel_and_dig_4b <<<nsms*32,NTHREAD>>> (fft_ave,fft_trim_u,maxn, npol);
-          #if DOKURTO
-          sel_and_dig_4b <<<nsms*32,NTHREAD>>> (fft_ave_kur,fft_trim_u_kur,maxn, npol);
-          #endif
+          sel_and_dig_4b <<<nsms*32,NTHREAD>>> (
+              fft_ave,fft_trim_u,maxn, npol);
+          if (RFI_MODE > 1)
+            sel_and_dig_4b <<<nsms*32,NTHREAD>>> (
+                fft_ave_kur,fft_trim_u_kur,maxn, npol);
           break;
         case 8:
-          sel_and_dig_8b <<<nsms*32,NTHREAD>>> (fft_ave,fft_trim_u,maxn, npol);
-          #if DOKURTO
-          sel_and_dig_8b <<<nsms*32,NTHREAD>>> (fft_ave_kur,fft_trim_u_kur,maxn, npol);
-          #endif
+          sel_and_dig_8b <<<nsms*32,NTHREAD>>> (
+              fft_ave,fft_trim_u,maxn, npol);
+          if (RFI_MODE > 1)
+          sel_and_dig_8b <<<nsms*32,NTHREAD>>> (
+              fft_ave_kur,fft_trim_u_kur,maxn, npol);
           break;
         default:
-          sel_and_dig_2b <<<nsms*32,NTHREAD>>> (fft_ave,fft_trim_u,maxn, npol);
-          #if DOKURTO
-          sel_and_dig_2b <<<nsms*32,NTHREAD>>> (fft_ave_kur,fft_trim_u_kur,maxn, npol);
-          #endif
+          sel_and_dig_2b <<<nsms*32,NTHREAD>>> (
+              fft_ave,fft_trim_u,maxn, npol);
+          if (RFI_MODE > 1)
+            sel_and_dig_2b <<<nsms*32,NTHREAD>>> (
+                fft_ave_kur,fft_trim_u_kur,maxn, npol);
           break;
       }
       cudacheck ( cudaGetLastError () );
-      #ifdef PROFILE
+      #if PROFILE
       CUDA_PROFILE_STOP(start,stop,&elapsed)
       digitize_time += elapsed;
       #endif
 
-      #ifdef PROFILE
+      #if PROFILE
       cudaEventRecord (start,0);
       #endif 
 
       // copy filterbanked data back to host
       cudacheck (cudaMemcpy (
-            fft_trim_u_host,fft_trim_u,maxn,cudaMemcpyDeviceToHost) );
-      #if DOKURTO
-      cudacheck (cudaMemcpy (
-            fft_trim_u_kur_host,fft_trim_u_kur,maxn,cudaMemcpyDeviceToHost) );
-      #endif
+            fft_trim_u_hst,fft_trim_u,maxn,cudaMemcpyDeviceToHost) );
+      if (RFI_MODE > 1)
+        cudacheck (cudaMemcpy ( fft_trim_u_kur_hst,
+            fft_trim_u_kur,maxn,cudaMemcpyDeviceToHost) );
 
       #if DOHISTO
       // copy histograms
@@ -1056,7 +1125,6 @@ int main (int argc, char *argv[])
             cudaMemcpyDeviceToHost) );
       #endif
 
-      #if DOKURTO
       #if WRITE_KURTO
       // copy kurtosis
       cudacheck (cudaMemcpy (
@@ -1066,9 +1134,8 @@ int main (int argc, char *argv[])
             kur_fb_hst,kur_fb_dev,2*fft_per_chunk*sizeof(cufftReal),
             cudaMemcpyDeviceToHost) );
       #endif
-      #endif
 
-      #ifdef PROFILE
+      #if PROFILE
       CUDA_PROFILE_STOP(start,stop,&elapsed)
       misc_time += elapsed;
       #endif
@@ -1076,32 +1143,33 @@ int main (int argc, char *argv[])
       // finally, push the filterbanked time samples onto psrdada buffer
       // and/or write out to sigproc
 
-      #ifdef PROFILE
+      #if PROFILE
       cudaEventRecord (start,0);
       #endif 
+
       if (key_out)
       {
-        #if DOKURTO
-        //ipcio_write (hdu_out->data_block,(char *)fft_trim_u_kur_host,maxn);
-        ipcio_write (hdu_out->data_block,(char *)fft_trim_u_kur_host,maxn);
-        #else
-        ipcio_write (hdu_out->data_block,(char *)fft_trim_u_host,maxn);
-        #endif
+        if (RFI_MODE == 2)
+          ipcio_write (
+            hdu_out->data_block,(char *)fft_trim_u_kur_hst,maxn);
+        else
+          ipcio_write (hdu_out->data_block,(char *)fft_trim_u_hst,maxn);
       }
-      fwrite (fft_trim_u_host,1,maxn,fb_fp);
+
+      fwrite (fft_trim_u_hst,1,maxn,fb_fp);
       fb_bytes_written += maxn;
+      if (RFI_MODE == 2)
+        fwrite (fft_trim_u_kur_hst,1,maxn,fb_kurto_fp);
+
       #if DOHISTO
       fwrite (histo_hst,sizeof(unsigned int),512,histo_fp);
       #endif
-      #if DOKURTO
-      fwrite (fft_trim_u_kur_host,1,maxn,fb_kurto_fp);
       #if WRITE_KURTO
       fwrite (kur_hst,sizeof(cufftReal),2*nkurto_per_chunk,kurto_fp);
       fwrite (kur_fb_hst,sizeof(cufftReal),2*fft_per_chunk,block_kurto_fp);
       fwrite (kur_weights_hst,sizeof(cufftReal),fft_per_chunk,weight_fp);
       #endif
-      #endif
-      #ifdef PROFILE
+      #if PROFILE
       CUDA_PROFILE_STOP(start,stop,&elapsed)
       write_time += elapsed;
       #endif
@@ -1109,7 +1177,7 @@ int main (int argc, char *argv[])
     }
   } // end loop over packets
 
-  #ifdef PROFILE
+  #if PROFILE
   cudaEventRecord(start,0);
   #endif 
 
@@ -1119,16 +1187,14 @@ int main (int argc, char *argv[])
 
   // close files
   fclose (fb_fp);
+  if (fb_kurto_fp) fclose (fb_kurto_fp);
   #if DOHISTO
   fclose (histo_fp);
   #endif
-  #if DOKURTO
-  fclose (fb_kurto_fp);
   #if WRITE_KURTO
   fclose (kurto_fp);
   fclose (block_kurto_fp);
   fclose (weight_fp);
-  #endif
   #endif
   uint64_t samps_written = (fb_bytes_written*(8/NBIT))/(CHANMAX-CHANMIN+1);
   multilog (log, LOG_INFO, "Wrote %.2f MB (%.2f s) to %s\n",
@@ -1180,7 +1246,7 @@ int main (int argc, char *argv[])
   }
   */
 
-  #ifdef PROFILE
+  #if PROFILE
   CUDA_PROFILE_STOP(start,stop,&flush_time)
   CUDA_PROFILE_STOP(start_total,stop_total,&total_time)
   float sub_time = alloc_time + hdr_time + read_time + todev_time + 
@@ -1228,27 +1294,31 @@ int main (int argc, char *argv[])
   cudaFree (fft_out);
   cudaFree (fft_ave);
   cudaFree (fft_trim_u);
-  cudaFreeHost (fft_trim_u_host);
+  cudaFreeHost (fft_trim_u_hst);
+  if (RFI_MODE == 2)
+  {
+    cudaFree (fft_out_kur);
+    cudaFree (fft_ave_kur);
+    cudaFree (fft_trim_u_kur);
+    cudaFreeHost (fft_trim_u_kur_hst);
+  }
+  if (RFI_MODE)
+  {
+    cudaFree (kur_dev);
+    cudaFree (kur_fb_dev);
+    cudaFree (kur_weights_dev);
+  }
   #if DOHISTO
   cudaFree (histo_dev);
   cudaFreeHost (histo_hst);
   #endif
-  #if DOKURTO
-  cudaFree (fft_out_kur);
-  cudaFree (fft_ave_kur);
-  cudaFree (fft_trim_u_kur);
-  cudaFreeHost (fft_trim_u_host);
-  cudaFree (kur_dev);
-  cudaFree (kur_fb_dev);
-  cudaFree (kur_weights_dev);
   #if WRITE_KURTO
   cudaFreeHost (kur_hst);
   cudaFreeHost (kur_fb_hst);
   cudaFreeHost (kur_weights_hst);
   #endif
-  #endif
 
-  #ifdef PROFILE
+  #if PROFILE
   cudaEventDestroy (start);
   cudaEventDestroy (stop);
   cudaEventDestroy (start_total);
@@ -1283,9 +1353,6 @@ int main (int argc, char *argv[])
 #define Z2b_1 sqrt(4.5*Ab)
 #define Z2b_2 (1-2./(9*Ab))
 #define Z2b_3 sqrt(2./(mu2b*(Ab-4)))
-// Z2 = Z1_1*(Z1_2-((1-2./A)/(1+(g2-mu1)*Z2_3))^(1/3))
-
-
 
 //convert unsigned char time array to float
 __global__ void convertarray (cufftReal *time, unsigned char *utime, size_t n)
