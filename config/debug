@@ -1,2 +1,2 @@
 # hostname iface gpu reader_port writer_port info_port baseband_dada_key fb_dada_key write_fb nbit
-vlite-difx1.evla.nrao.edu eth0 0 30001 30101 30201 40 0 2 2
+vlite-difx1.evla.nrao.edu eth0 0 30001 30101 30201 40 0 0 2

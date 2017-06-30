@@ -1,8 +1,20 @@
 #!/bin/bash
-#set -x
+set -x
 # arguments should be
 # $1 = reader port
 # $2 = baseband dada key 
 # $3 = filterbank dada key 
 # $4 = write_fb
-/home/vlite-master/mtk/src/process_baseband -p ${1} -k ${2} -K ${3} -w ${4} &
+# $5 = nbit
+if [ ${3} -gt 0 ]
+then
+# this buffer is sized for 4s of data, so 64s total
+sudo /home/vlite-master/mtk/bin/dada_db -k ${3} -d
+sudo /home/vlite-master/mtk/bin/dada_db -k ${3} -l -b 5242880 -n 16
+fi
+/home/vlite-master/mtk/src/process_baseband -p ${1} -k ${2} -K ${3} -w ${4} -b ${5} -o
+if [ ${3} -gt 0 ]
+then
+sleep 5
+sudo /home/vlite-master/mtk/bin/dada_db -k ${3} -d
+fi

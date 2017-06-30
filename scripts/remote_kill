@@ -1,6 +1,13 @@
-ssh vliteops@vlite-difx1 "sudo killall writer; sudo killall process_baseband" &> /dev/null
-ssh vliteops@vlite-difx2 "sudo killall writer; sudo killall process_baseband" &> /dev/null
-#ssh vliteops@vlite-difx3 "sudo killall writer; sudo killall process_baseband" > /dev/null
-#ssh vliteops@vlite-difx4 "sudo killall writer; sudo killall process_baseband" > /dev/null
-#ssh vliteops@vlite-difx5 "sudo killall writer; sudo killall process_baseband" > /dev/null
-#ssh vliteops@vlite-difx6 "sudo killall writer; sudo killall process_baseband" > /dev/null
+#/bin/bash
+# set -x
+#C=1
+#while [ $C -lt 7 ]; do
+#  ssh vliteops@vlite-difx${C} "sudo killall -SIGINT writer; sudo killall -SIGINT process_baseband; sudo /home/vlite-master/mtk/scripts/kill_dada" &> /dev/null
+#  let C=$C+1
+#done
+ssh vliteops@vlite-difx1 "sudo killall -SIGINT writer; sudo killall -SIGINT process_baseband; sleep 0.1; sudo /home/vlite-master/mtk/scripts/kill_dada" &> /dev/null
+#ssh vliteops@vlite-difx2 "sudo killall -SIGINT writer; sudo killall -SIGINT process_baseband; sudo /home/vlite-master/mtk/scripts/kill_dada" &> /dev/null
+#ssh vliteops@vlite-difx3 "sudo killall -SIGINT writer; sudo killall -SIGINT process_baseband; sudo /home/vlite-master/mtk/scripts/kill_dada" &> /dev/null
+#ssh vliteops@vlite-difx4 "sudo killall -SIGINT writer; sudo killall -SIGINT process_baseband; sudo /home/vlite-master/mtk/scripts/kill_dada" &> /dev/null
+#ssh vliteops@vlite-difx5 "sudo killall -SIGINT writer; sudo killall -SIGINT process_baseband; sudo /home/vlite-master/mtk/scripts/kill_dada" &> /dev/null
+#ssh vliteops@vlite-difx6 "sudo killall -SIGINT writer; sudo killall -SIGINT process_baseband; sudo /home/vlite-master/mtk/scripts/kill_dada" &> /dev/null

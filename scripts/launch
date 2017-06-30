@@ -7,5 +7,6 @@ echo ${LINE}
 toks=( $LINE )
 ssh vliteops@${toks[0]} "nohup /home/vlite-master/mtk/scripts/start_single ${LINE} < /dev/null &> /dev/null" < /dev/null &> /dev/null
 done
-sleep 1
+sleep 2
 /home/vlite-master/mtk/src/messenger ${conf}
+

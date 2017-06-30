@@ -17,3 +17,4 @@ src/messenger
 src/process_baseband
 src/writer
 src/readbase
+.nfs*
