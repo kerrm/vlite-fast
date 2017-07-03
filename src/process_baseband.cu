@@ -358,18 +358,18 @@ int main (int argc, char *argv[])
   }
 
   // connect to output buffer (optional)
-  dada_hdu_t* hdu_out[NOUTBUFF];
-  for (int i = 0; i < NOUTBUFF; i++)
-    hdu_out[i] = NULL;
+  dada_hdu_t* hdu_out[NOUTBUFF] = {NULL};
+  FILE* heimdall_fp[NOUTBUFF] = {NULL};
+  int active_buffer = 0;
   if (key_out) {
     // connect to the output buffer(s)
     for (int i=0; i < NOUTBUFF; i++)
     {
       hdu_out[i] = dada_hdu_create (log);
-      dada_hdu_set_key (hdu_out,key_out);
-      if (dada_hdu_connect (hdu_out) != 0) {
+      dada_hdu_set_key (hdu_out[i],key_out+i*100);
+      if (dada_hdu_connect (hdu_out[i]) != 0) {
         multilog (log, LOG_ERR, 
-            "Unable to connect to outgoing PSRDADA buffer!\n");
+            "Unable to connect to outgoing PSRDADA buffer #%d!\n",i+1);
         exit (EXIT_FAILURE);
       }
     }
@@ -761,29 +761,37 @@ int main (int argc, char *argv[])
 
   if (key_out)
     //Write psrdada output header values
-    write_psrdada_header (hdu_out, incoming_hdr, npol, 
+    write_psrdada_header (hdu_out[active_buffer], incoming_hdr, npol, 
       RFI_MODE?fbfile_kur:fbfile);
-  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
 
   // write out a sigproc header
   write_sigproc_header (fb_fp, incoming_hdr, vdhdr, npol);
   if (2 == RFI_MODE)
     write_sigproc_header (fb_kurto_fp, incoming_hdr, vdhdr, npol);
-  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
 
   #if PROFILE
   CUDA_PROFILE_STOP(start,stop,&hdr_time)
   #endif
 
   // launch heimdall
-  FILE* heimdall_fp=NULL;
   if (key_out) {
+    if (heimdall_fp[active_buffer])
+    {
+      // have used previous buffer, make sure processing is finished
+      // NB this runs the risk of a data skip if it hasn't, but will 
+      // check for that error condition later
+      if (pclose (heimdall_fp[active_buffer]) != 0)
+      {
+        multilog (log, LOG_ERR, "heimdall exit status nonzero\n");
+        // TODO -- exit on such an error?
+      }
+      heimdall_fp[active_buffer] = NULL;
+    }
     char heimdall_cmd[256];
-    snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 62500 -gpu_id 0 -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -k %x -v", key_out); 
+    snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 62500 -gpu_id 0 -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -k %x -v", key_out + active_buffer*100); 
     multilog (log, LOG_INFO, "%s\n", heimdall_cmd);
-    heimdall_fp = popen (heimdall_cmd, "r");
+    heimdall_fp[active_buffer] = popen (heimdall_cmd, "r");
   }
-  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
 
   // set up sample# trackers and copy first frame into 1s-buffer
   int current_sec = getVDIFFrameSecond(vdhdr);
@@ -1156,10 +1164,11 @@ int main (int argc, char *argv[])
       if (key_out)
       {
         if (RFI_MODE == 2)
-          ipcio_write (
-            hdu_out->data_block,(char *)fft_trim_u_kur_hst,maxn);
+          ipcio_write (hdu_out[active_buffer]->data_block,
+              (char *)fft_trim_u_kur_hst,maxn);
         else
-          ipcio_write (hdu_out->data_block,(char *)fft_trim_u_hst,maxn);
+          ipcio_write (hdu_out[active_buffer]->data_block,
+              (char *)fft_trim_u_hst,maxn);
       }
 
       fwrite (fft_trim_u_hst,1,maxn,fb_fp);
@@ -1189,7 +1198,12 @@ int main (int argc, char *argv[])
 
   dadacheck (dada_hdu_unlock_read (hdu_in));
   if (key_out)
-    dadacheck (dada_hdu_unlock_write (hdu_out));
+  {
+    dadacheck (dada_hdu_unlock_write (hdu_out[active_buffer]));
+    // switch to next output buffer
+    if (NOUTBUFF == ++active_buffer)
+      active_buffer = 0;
+  }
 
   // close files
   fclose (fb_fp);
@@ -1210,22 +1224,13 @@ int main (int argc, char *argv[])
   CUDA_PROFILE_STOP(obs_start,obs_stop,&obs_time);
   multilog (log, LOG_INFO, "Proc Time...%.3f\n", obs_time*1e-3);
 
-  if (key_out)
-  {
-    float heimdall_time;
-    cudaEventRecord (obs_start,0);
-    // NB pclose blocks
-    int heimdall_status = pclose (heimdall_fp);
-    CUDA_PROFILE_STOP(obs_start,obs_stop,&heimdall_time);
-    multilog (log, LOG_INFO, "Heimdall lag time...%.3f\n", 
-      heimdall_time*1e-3);
-  }
-  // simulate the effects of running behind here to see what disaster haps
-  //nanosleep (&ts_10s,NULL);
-
+  // TODO -- this can't happen, because we've already disconnected
+  // from the input buffer!  Moreover, it seems to be an infinite
+  // loop; take it out for now
+  if (0) {
   // If there has been a major skip, need to continue to read from
   // buffer so it doesn't fill up
-  if (major_skip) {
+  //if (major_skip) {
     multilog (log, LOG_INFO, "Reading from buffer to clear major skip.\n");
     major_skip = 0;
     while (true) {
@@ -1289,8 +1294,11 @@ int main (int argc, char *argv[])
   dada_hdu_disconnect (hdu_in);
   dada_hdu_destroy (hdu_in);
   if (key_out) {
-    dada_hdu_disconnect (hdu_out);
-    dada_hdu_destroy (hdu_out);
+    for (int i=0; i < NOUTBUFF; i++)
+    {
+      dada_hdu_disconnect (hdu_out[i]);
+      dada_hdu_destroy (hdu_out[i]);
+    }
   }
 
   //free memory
