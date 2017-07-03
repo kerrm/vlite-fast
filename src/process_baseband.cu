@@ -339,7 +339,8 @@ int main (int argc, char *argv[])
   }
   multilog (log, LOG_INFO, "invoked with: \n%s\n", incoming_hdr);
   if (key_out)
-    multilog (log, LOG_INFO, "Will write to psrdada buffer.\n");
+    multilog (log, LOG_INFO, "Will write to %d psrdada buffers.\n",
+      NOUTBUFF);
 
   // sanity checks on configuration parameters
   if (NKURTO != 250 && NKURTO != 500) {
@@ -357,15 +358,20 @@ int main (int argc, char *argv[])
   }
 
   // connect to output buffer (optional)
-  dada_hdu_t* hdu_out = NULL;
+  dada_hdu_t* hdu_out[NOUTBUFF];
+  for (int i = 0; i < NOUTBUFF; i++)
+    hdu_out[i] = NULL;
   if (key_out) {
-    // connect to the output buffer
-    hdu_out = dada_hdu_create (log);
-    dada_hdu_set_key (hdu_out,key_out);
-    if (dada_hdu_connect (hdu_out) != 0) {
-      multilog (log, LOG_ERR, 
-          "Unable to connect to outgoing PSRDADA buffer!\n");
-      exit (EXIT_FAILURE);
+    // connect to the output buffer(s)
+    for (int i=0; i < NOUTBUFF; i++)
+    {
+      hdu_out[i] = dada_hdu_create (log);
+      dada_hdu_set_key (hdu_out,key_out);
+      if (dada_hdu_connect (hdu_out) != 0) {
+        multilog (log, LOG_ERR, 
+            "Unable to connect to outgoing PSRDADA buffer!\n");
+        exit (EXIT_FAILURE);
+      }
     }
   }
 

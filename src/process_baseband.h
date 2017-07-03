@@ -25,6 +25,12 @@ cudaEventElapsedTime (Z,X,Y);}
 //#define NSCRUNCH 5 // time scrunch factor
 #define SEG_PER_SEC 10 // break each second of data up into chunks
 //#define SEG_PER_SEC 5 // break each second of data up into chunks
+
+// write to multiple output buffers so we don't have to block on a
+// completed observation; switch between them in ring fashion
+#define NOUTBUFF 1
+
+// RFI excision and statistics recording options
 #define NKURTO 500
 #define DOHISTO 0
 #define WRITE_KURTO 0
