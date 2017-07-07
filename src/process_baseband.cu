@@ -295,17 +295,17 @@ int main (int argc, char *argv[])
 
   #if PROFILE
   // support for measuring run times of parts
-  cudaEvent_t start,stop,start_total,stop_total;
+  cudaEvent_t start,stop; //,start_total,stop_total;
   cudaEventCreate (&start);
   cudaEventCreate (&stop);
-  cudaEventCreate (&start_total);
-  cudaEventCreate (&stop_total);
-  cudaEventRecord (start_total,0);
+  //cudaEventCreate (&start_total);
+  //cudaEventCreate (&stop_total);
+  //cudaEventRecord (start_total,0);
   float alloc_time=0, hdr_time=0, read_time=0, todev_time=0, 
       convert_time=0, kurtosis_time=0, fft_time=0, histo_time=0,
       normalize_time=0, tscrunch_time=0, pscrunch_time=0, 
       digitize_time=0, write_time=0, flush_time=0, misc_time=0,
-      elapsed=0, total_time=0;
+      heimdall_time=0, elapsed=0;//, total_time=0;
   #endif
   // measure full run time time
   cudaEvent_t obs_start, obs_stop;
@@ -366,7 +366,7 @@ int main (int argc, char *argv[])
     for (int i=0; i < NOUTBUFF; i++)
     {
       hdu_out[i] = dada_hdu_create (log);
-      dada_hdu_set_key (hdu_out[i],key_out+i*100);
+      dada_hdu_set_key (hdu_out[i],key_out+i*2);
       if (dada_hdu_connect (hdu_out[i]) != 0) {
         multilog (log, LOG_ERR, 
             "Unable to connect to outgoing PSRDADA buffer #%d!\n",i+1);
@@ -547,8 +547,9 @@ int main (int argc, char *argv[])
   multilog (log, LOG_INFO, "Waiting for DADA header.\n");
   fflush (logfile_fp);
 
-  // this will block until a header has been created by writer, signalling the start of
-  // an observation
+  // this will block until a header has been created by writer, 
+  // signalling the start of an observation
+  // TODO -- this is encapsulated in dada_hdu_open
   uint64_t hdr_size = 0;
   char* ascii_hdr = ipcbuf_get_next_read (hdu_in->header_block,&hdr_size);
   multilog (log, LOG_INFO, "Received header with size %d.\n", hdr_size);
@@ -601,6 +602,12 @@ int main (int argc, char *argv[])
     ssize_t nread = ipcio_read (hdu_in->data_block,frame_buff,VD_FRM);
     if (nread != VD_FRM)
     {
+      if (0==nread)
+      {
+        multilog (log, LOG_INFO,
+            "Observation ended before reaching 1-s boundary.\n");
+        break;
+      }
       bad_packets++;
       continue;
     }
@@ -636,7 +643,6 @@ int main (int argc, char *argv[])
     last_sample[thread] = sample;
 
   }
-  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
 
   if (bad_packets > 0)
     multilog (log, LOG_INFO,
@@ -649,19 +655,9 @@ int main (int argc, char *argv[])
     continue;
   }
 
-  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
-  nanosleep (&ts_1ms,NULL);
-  nanosleep (&ts_1ms,NULL);
-  nanosleep (&ts_1ms,NULL);
-  nanosleep (&ts_1ms,NULL);
-  nanosleep (&ts_1ms,NULL);
-  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
-
   // Open up filterbank file at appropriate time
   char fbfile[256];
-  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
   get_fbfile (fbfile, 256, incoming_hdr, vdhdr);
-  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
   char fbfile_kur[256];
   change_extension (fbfile, fbfile_kur, ".fil", "_kur.fil");
 
@@ -678,9 +674,15 @@ int main (int argc, char *argv[])
   char weightfile[256] = "";
   change_extension (fbfile, weightfile, ".fil", ".weights");
   #endif
-  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
 
-  // check for write to /dev/null
+  // write out psrdada header values *before* checking for null write,
+  // as we need to pass on a valid file name
+  if (key_out)
+    write_psrdada_header (hdu_out[active_buffer], incoming_hdr, npol, 
+      RFI_MODE?fbfile_kur:fbfile);
+
+
+  // check for write to /dev/null and udpate file names if necessary
   int write_to_null =  0==write_fb;
   if (write_fb == 1) {
     char name[OBSERVATION_NAME_SIZE];
@@ -692,10 +694,10 @@ int main (int argc, char *argv[])
           name);
     }
     else {
+      write_to_null = 1;
       multilog (log, LOG_INFO,
           "Source %s not on target list, disabling filterbank data.\n",
           name);
-      write_to_null = 1;
     }
   }
   if (write_to_null)
@@ -714,29 +716,28 @@ int main (int argc, char *argv[])
       strncpy (weightfile,"/dev/null",255); 
     #endif
   }
-  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
 
   FILE *fb_fp,*fb_kurto_fp=NULL;
   uint64_t fb_bytes_written = 0;
+  // this buffer size is correct for 100ms of default data
   if (RFI_MODE == 0 || RFI_MODE == 2 )
   {
-    fb_fp = myopen (fbfile, "wb", true);
+    fb_fp = myopen (fbfile, "wb", true, trim);
     multilog (log, LOG_INFO,
         "Writing no-RFI-excision filterbanks to %s.\n",fbfile);
   }
   else
   {
-    fb_fp = myopen (fbfile_kur, "wb", true);
+    fb_fp = myopen (fbfile_kur, "wb", trim);
     multilog (log, LOG_INFO,
         "Writing RFI-excision filterbanks to %s.\n",fbfile_kur);
   }
   if (RFI_MODE == 2)
   {
-    fb_kurto_fp = myopen (fbfile_kur, "wb", true);
+    fb_kurto_fp = myopen (fbfile_kur, "wb", trim);
     multilog (log, LOG_INFO,
         "Writing RFI-excision filterbanks to %s.\n",fbfile_kur);
   }
-  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
 
   #if DOHISTO
   FILE *histo_fp = myopen (histofile, "wb", true);
@@ -753,16 +754,10 @@ int main (int argc, char *argv[])
   multilog (log, LOG_INFO, "Writing weights to %s.\n",weightfile);
   #endif
   fflush (logfile_fp);
-  multilog (log, LOG_INFO, "hdu_in=%p, hdu_in->data_block=%p\n",hdu_in,hdu_in->data_block);
 
   #if PROFILE
   cudaEventRecord(start,0);
   #endif
-
-  if (key_out)
-    //Write psrdada output header values
-    write_psrdada_header (hdu_out[active_buffer], incoming_hdr, npol, 
-      RFI_MODE?fbfile_kur:fbfile);
 
   // write out a sigproc header
   write_sigproc_header (fb_fp, incoming_hdr, vdhdr, npol);
@@ -780,15 +775,23 @@ int main (int argc, char *argv[])
       // have used previous buffer, make sure processing is finished
       // NB this runs the risk of a data skip if it hasn't, but will 
       // check for that error condition later
+      #if PROFILE
+      cudaEventRecord(start,0);
+      #endif
+      multilog (log, LOG_INFO, "Preparing to pclose heimdall.\n");
       if (pclose (heimdall_fp[active_buffer]) != 0)
       {
         multilog (log, LOG_ERR, "heimdall exit status nonzero\n");
         // TODO -- exit on such an error?
       }
       heimdall_fp[active_buffer] = NULL;
+      #if PROFILE
+      CUDA_PROFILE_STOP(start,stop,&elapsed)
+      heimdall_time += elapsed;
+      #endif
     }
     char heimdall_cmd[256];
-    snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 62500 -gpu_id 0 -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -k %x -v", key_out + active_buffer*100); 
+    snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 62500 -gpu_id 0 -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -k %x -v", key_out + active_buffer*2); 
     multilog (log, LOG_INFO, "%s\n", heimdall_cmd);
     heimdall_fp[active_buffer] = popen (heimdall_cmd, "r");
   }
@@ -1171,10 +1174,19 @@ int main (int argc, char *argv[])
               (char *)fft_trim_u_hst,maxn);
       }
 
+      // TODO -- tune this I/O.  The buffer size is set to 8192, but
+      // according to fstat the nfs wants a block size of 1048576! Each
+      // 100ms of data is 65536 with the current parameters.  So optimally
+      // we would buffer in memory for the full 1 second before a write.
+      // However, a simple improvement will be reducing the write calls by
+      // a factor of 8 by either changing the buffer size or using the
+
+      // TODO -- add error checking for these writes
+
       fwrite (fft_trim_u_hst,1,maxn,fb_fp);
-      fb_bytes_written += maxn;
       if (RFI_MODE == 2)
         fwrite (fft_trim_u_kur_hst,1,maxn,fb_kurto_fp);
+      fb_bytes_written += maxn;
 
       #if DOHISTO
       fwrite (histo_hst,sizeof(unsigned int),512,histo_fp);
@@ -1192,10 +1204,6 @@ int main (int argc, char *argv[])
     }
   } // end loop over packets
 
-  #if PROFILE
-  cudaEventRecord(start,0);
-  #endif 
-
   dadacheck (dada_hdu_unlock_read (hdu_in));
   if (key_out)
   {
@@ -1204,6 +1212,10 @@ int main (int argc, char *argv[])
     if (NOUTBUFF == ++active_buffer)
       active_buffer = 0;
   }
+
+  #if PROFILE
+  cudaEventRecord(start,0);
+  #endif 
 
   // close files
   fclose (fb_fp);
@@ -1259,8 +1271,8 @@ int main (int argc, char *argv[])
 
   #if PROFILE
   CUDA_PROFILE_STOP(start,stop,&flush_time)
-  CUDA_PROFILE_STOP(start_total,stop_total,&total_time)
-  float sub_time = alloc_time + hdr_time + read_time + todev_time + 
+  //CUDA_PROFILE_STOP(start_total,stop_total,&total_time)
+  float sub_time = hdr_time + read_time + todev_time + 
       histo_time + convert_time + kurtosis_time + fft_time + 
       normalize_time + pscrunch_time + tscrunch_time + digitize_time + 
       write_time + flush_time + misc_time;
@@ -1277,9 +1289,16 @@ int main (int argc, char *argv[])
   multilog (log, LOG_INFO, "Digitize....%.3f\n", digitize_time*1e-3);
   multilog (log, LOG_INFO, "Write.......%.3f\n", write_time*1e-3);
   multilog (log, LOG_INFO, "Flush.......%.3f\n", flush_time*1e-3);
+  multilog (log, LOG_INFO, "Heimdall....%.3f\n", heimdall_time*1e-3);
   multilog (log, LOG_INFO, "Misc........%.3f\n", misc_time*1e-3);
   multilog (log, LOG_INFO, "Sum of subs.%.3f\n", sub_time*1e-3);
-  multilog (log, LOG_INFO, "Total run...%.3f\n", total_time*1e-3);
+  //multilog (log, LOG_INFO, "Total run...%.3f\n", total_time*1e-3);
+
+  // reset values for next loop
+  hdr_time=read_time=todev_time=convert_time=kurtosis_time=fft_time=0;
+  histo_time=normalize_time=tscrunch_time=pscrunch_time=digitize_time=0;
+  write_time=flush_time=misc_time=heimdall_time=elapsed=0;
+
   #endif
 
   if (single_pass)
@@ -1335,8 +1354,8 @@ int main (int argc, char *argv[])
   #if PROFILE
   cudaEventDestroy (start);
   cudaEventDestroy (stop);
-  cudaEventDestroy (start_total);
-  cudaEventDestroy (stop_total);
+  //cudaEventDestroy (start_total);
+  //cudaEventDestroy (stop_total);
   #endif
   cudaEventDestroy (obs_start);
   cudaEventDestroy (obs_stop);
