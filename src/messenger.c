@@ -165,7 +165,6 @@ int main(int argc, char** argv)
   char scaninfofile[128];
   //char eventlogfile[] = "eventlog.txt";
   char msg[MSGMAXSIZE];
-  char src[SRCMAXSIZE];
   char from[24]; //ip address of multicast sender
 
   FILE *sfd;//, *efd;
@@ -320,7 +319,6 @@ int main(int argc, char** argv)
             "Message type: %d = %s\n",D.type,ScanInfoTypeString[D.type]);
         if (D.type == SCANINFO_OBSERVATION) {
           od = &(D.data.observation);
-          strcpy (src,od->name);
     
           sprintf (scaninfofile,"%s/%s.%s.obsinfo.%04d.%04d.txt",
             OBSINFODIR,od->datasetId,od->name,od->scanNo,od->subscanNo);
@@ -338,7 +336,8 @@ int main(int argc, char** argv)
 #endif
         
           // TO ADD: Check that Writers are still connected before sending; change their isonnected elements if they are not
-          if (strcasecmp (src,"FINISH") == 0) {
+          if (strcasecmp (od->name,"FINISH") == 0)
+          {
             multilog (log, LOG_INFO, "sending STOP command\n");
             for (int ii=0; ii<nvconf; ++ii) {
               if (send (cr[ii].svc, cmdstop, 1, 0) == -1)
@@ -350,7 +349,10 @@ int main(int argc, char** argv)
             // TEMP -- see if this sleep is helpful
             nanosleep (&ts_500ms, NULL);
           }
-          else {
+          else if (od->scanNo > 1)
+            multilog (log, LOG_INFO, "scanNo==1: ignoring DUMMY scan\n");
+          else
+          {
             // TO ADD: Check that Readers/Writers are still connected before sending; change their isonnected elements if they are not
             if (recording) {
               multilog (log, LOG_INFO, "sending STOP command\n");
