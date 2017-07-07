@@ -146,7 +146,12 @@ int main(int argc, char *argv[])
 
   // allocate memory for 1s of data; NB this is a large buffer, but because
   // of edge effects, will discard ~0.37s of data at DM=30!
-  size_t buflen = VLITE_RATE/2;
+  size_t buflen = VLITE_RATE/4;
+  if (buflen < n_dm_samp)
+  {
+    fprintf (stderr, "Buffer not long enough to perform dedispersion!");
+    exit (EXIT_FAILURE);
+  }
   cufftReal* fdat_dev; cudacheck (
   cudaMalloc ((void**)&fdat_dev, sizeof(cufftReal)*buflen) );
 
