@@ -349,7 +349,7 @@ int main(int argc, char** argv)
             // TEMP -- see if this sleep is helpful
             nanosleep (&ts_500ms, NULL);
           }
-          else if (od->scanNo > 1)
+          else if (od->scanNo == 1)
             multilog (log, LOG_INFO, "scanNo==1: ignoring DUMMY scan\n");
           else
           {
