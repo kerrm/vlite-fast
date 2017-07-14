@@ -28,7 +28,7 @@ cudaEventElapsedTime (Z,X,Y);}
 
 // write to multiple output buffers so we don't have to block on a
 // completed observation; switch between them in ring fashion
-#define NOUTBUFF 1
+#define NOUTBUFF 2
 
 // RFI excision and statistics recording options
 #define NKURTO 500

@@ -47,8 +47,16 @@ void usage ()
 	  ,(uint64_t)READER_SERVICE_PORT);
 }
 
+void exit_handler (void) {
+  fprintf (stderr, "exit handler called\n");
+}
+
 void sigint_handler (int dummy) {
-  fclose (logfile_fp);
+ if (logfile_fp)
+ {
+    fclose (logfile_fp);
+    logfile_fp = NULL;
+  }
   // TODO other cleanup?
   exit (EXIT_SUCCESS);
 }
@@ -186,6 +194,9 @@ int main (int argc, char *argv[])
 {
   // register SIGINT handling
   signal (SIGINT, sigint_handler);
+
+  // register exit function
+  atexit (exit_handler);
 
   int exit_status = EXIT_SUCCESS;
   key_t key_in = 0x40;
@@ -363,13 +374,13 @@ int main (int argc, char *argv[])
   int active_buffer = 0;
   if (key_out) {
     // connect to the output buffer(s)
-    for (int i=0; i < NOUTBUFF; i++)
+    for (int ibuff=0; ibuff < NOUTBUFF; ibuff++)
     {
-      hdu_out[i] = dada_hdu_create (log);
-      dada_hdu_set_key (hdu_out[i],key_out+i*2);
-      if (dada_hdu_connect (hdu_out[i]) != 0) {
+      hdu_out[ibuff] = dada_hdu_create (log);
+      dada_hdu_set_key (hdu_out[ibuff],key_out+ibuff*2);
+      if (dada_hdu_connect (hdu_out[ibuff]) != 0) {
         multilog (log, LOG_ERR, 
-            "Unable to connect to outgoing PSRDADA buffer #%d!\n",i+1);
+            "Unable to connect to outgoing PSRDADA buffer #%d!\n",ibuff+1);
         exit (EXIT_FAILURE);
       }
     }
@@ -675,12 +686,9 @@ int main (int argc, char *argv[])
   change_extension (fbfile, weightfile, ".fil", ".weights");
   #endif
 
-  // write out psrdada header values *before* checking for null write,
-  // as we need to pass on a valid file name
-  if (key_out)
-    write_psrdada_header (hdu_out[active_buffer], incoming_hdr, npol, 
-      RFI_MODE?fbfile_kur:fbfile);
-
+  // cache file name in case we need to change it to /dev/null
+  char heimdall_file[256] = "";
+  strncpy (heimdall_file,RFI_MODE?fbfile_kur:fbfile,255);
 
   // check for write to /dev/null and udpate file names if necessary
   int write_to_null =  0==write_fb;
@@ -759,6 +767,11 @@ int main (int argc, char *argv[])
   cudaEventRecord(start,0);
   #endif
 
+  // write out psrdada header; NB this locks the hdu for writing
+  if (key_out)
+    write_psrdada_header (hdu_out[active_buffer], incoming_hdr, npol, 
+      heimdall_file);
+
   // write out a sigproc header
   write_sigproc_header (fb_fp, incoming_hdr, vdhdr, npol);
   if (2 == RFI_MODE)
@@ -768,34 +781,6 @@ int main (int argc, char *argv[])
   CUDA_PROFILE_STOP(start,stop,&hdr_time)
   #endif
 
-  // launch heimdall
-  if (key_out) {
-    if (heimdall_fp[active_buffer])
-    {
-      // have used previous buffer, make sure processing is finished
-      // NB this runs the risk of a data skip if it hasn't, but will 
-      // check for that error condition later
-      #if PROFILE
-      cudaEventRecord(start,0);
-      #endif
-      multilog (log, LOG_INFO, "Preparing to pclose heimdall.\n");
-      if (pclose (heimdall_fp[active_buffer]) != 0)
-      {
-        multilog (log, LOG_ERR, "heimdall exit status nonzero\n");
-        // TODO -- exit on such an error?
-      }
-      heimdall_fp[active_buffer] = NULL;
-      #if PROFILE
-      CUDA_PROFILE_STOP(start,stop,&elapsed)
-      heimdall_time += elapsed;
-      #endif
-    }
-    char heimdall_cmd[256];
-    snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 62500 -gpu_id 0 -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -k %x -v", key_out + active_buffer*2); 
-    multilog (log, LOG_INFO, "%s\n", heimdall_cmd);
-    heimdall_fp[active_buffer] = popen (heimdall_cmd, "r");
-  }
-
   // set up sample# trackers and copy first frame into 1s-buffer
   int current_sec = getVDIFFrameSecond(vdhdr);
   last_sample[0] = last_sample[1] = -1;
@@ -803,6 +788,8 @@ int main (int argc, char *argv[])
   multilog (log, LOG_INFO, "Starting sec=%d, thread=%d\n",current_sec,current_thread);
 
   bool skipped_data_announced = false;
+  double integrated = 0.0;
+  bool heimdall_launched = false;
 
   while(true) // loop over data packets
   {
@@ -844,7 +831,7 @@ int main (int argc, char *argv[])
 #endif
 
       if (nread < 0 ) {
-        multilog (log, LOG_ERR, "Error on nread.\n");
+        multilog (log, LOG_ERR, "Error on nread=%d.\n",nread);
         exit (EXIT_FAILURE);
       }
       if (nread != VD_FRM) {
@@ -885,12 +872,49 @@ int main (int argc, char *argv[])
     }
     if (quit) {
       multilog (log, LOG_INFO, "Received CMD_QUIT.  Exiting!.\n");
-      // this will break out of data loop, write out file, then break out of observation
-      // loop to exit program
+      // this will break out of data loop, write out file, then break out
+      // of observation loop to exit program
       break;
     }
+
     // keep log on disk up to date
     fflush (logfile_fp);
+
+    // if we have accumulated (exactly) 10s of data, then launch heimdall
+    // (heimdall will hang on very short runs, not sure why, so make sure
+    // we never launch it without a reasonable amount of data
+    if (key_out && (fabs(integrated-10)<0.01))
+    {
+      if (heimdall_fp[active_buffer])
+      {
+        // have used previous buffer, make sure processing is finished
+        // NB this runs the risk of a data skip if it hasn't, but will 
+        // check for that error condition later
+        #if PROFILE
+        cudaEventRecord(start,0);
+        #endif
+        multilog (log, LOG_INFO, "Preparing to pclose heimdall.\n");
+        // TODO -- this is a potential source of an infinite wait, if
+        // heimdall process hangs.  Not sure how to avoid it, though.
+        if (pclose (heimdall_fp[active_buffer]) != 0)
+        {
+          multilog (log, LOG_ERR, "heimdall exit status nonzero\n");
+          // TODO -- exit on such an error?
+        }
+        heimdall_fp[active_buffer] = NULL;
+        multilog (log, LOG_INFO, "Successful pclose.\n");
+        #if PROFILE
+        CUDA_PROFILE_STOP(start,stop,&elapsed)
+        heimdall_time += elapsed;
+        #endif
+      }
+      char heimdall_cmd[256];
+      // NB need to redirect stderr or else we can't catch it
+      snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 62500 -gpu_id 0 -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -k %x", key_out + active_buffer*2); 
+      multilog (log, LOG_INFO, "%s\n", heimdall_cmd);
+      heimdall_fp[active_buffer] = popen (heimdall_cmd, "r");
+      heimdall_launched = true;
+    }
 
     // check that both buffers are full
     skipped_data_announced = false;
@@ -907,6 +931,7 @@ int main (int argc, char *argv[])
       {
         multilog (log, LOG_ERR,
           "Found skipped data in dispatch!  Aborting this observation.\n");
+        major_skip = 1; // TODO -- make this more descriptive
         //size_t idx = VLITE_RATE*i + last_sample[i]*VD_DAT;
         //memset(udat+idx,0,(target-last_sample[i])*VD_DAT);
         break;
@@ -1166,12 +1191,16 @@ int main (int argc, char *argv[])
 
       if (key_out)
       {
-        if (RFI_MODE == 2)
-          ipcio_write (hdu_out[active_buffer]->data_block,
-              (char *)fft_trim_u_kur_hst,maxn);
-        else
-          ipcio_write (hdu_out[active_buffer]->data_block,
-              (char *)fft_trim_u_hst,maxn);
+        char* outbuff = RFI_MODE==2? (char*)fft_trim_u_kur_hst:
+                                     (char*)fft_trim_u_hst;
+        size_t written = ipcio_write (
+            hdu_out[active_buffer]->data_block,outbuff,maxn);
+        if (written != maxn)
+        {
+          multilog (log, LOG_ERR, "Tried to write %lu bytes to output psrdada buffer but only wrote %lu.", maxn, written);
+          fprintf (stderr, "Tried to write %lu bytes to output psrdada buffer but only wrote %lu.", maxn, written);
+          exit (EXIT_FAILURE);
+        }
       }
 
       // TODO -- tune this I/O.  The buffer size is set to 8192, but
@@ -1201,50 +1230,47 @@ int main (int argc, char *argv[])
       write_time += elapsed;
       #endif
 
+      integrated += 1./double(SEG_PER_SEC);
+
     }
+
   } // end loop over packets
 
-  dadacheck (dada_hdu_unlock_read (hdu_in));
   if (key_out)
   {
     dadacheck (dada_hdu_unlock_write (hdu_out[active_buffer]));
-    // switch to next output buffer
-    if (NOUTBUFF == ++active_buffer)
-      active_buffer = 0;
+    if (heimdall_launched)
+    {
+      // switch to next output buffer
+      if (NOUTBUFF == ++active_buffer)
+        active_buffer = 0;
+    }
+    else
+    {
+      // did not launch heimdall, need to clear output buffer
+      multilog (log, LOG_INFO, "Clearing output psrdada buffer.\n");
+      dadacheck (dada_hdu_lock_read (hdu_out[active_buffer]));
+      ipcbuf_get_next_read (
+          hdu_out[active_buffer]->header_block,&hdr_size);
+      dadacheck (ipcbuf_mark_cleared (
+          hdu_out[active_buffer]->header_block));
+      ipcbuf_get_next_read (
+          (ipcbuf_t*)hdu_out[active_buffer]->data_block,&hdr_size);
+      dadacheck (ipcbuf_mark_cleared ( (ipcbuf_t*)
+          hdu_out[active_buffer]->data_block));
+      dadacheck (dada_hdu_unlock_read (hdu_out[active_buffer]));
+    }
   }
 
-  #if PROFILE
-  cudaEventRecord(start,0);
-  #endif 
-
-  // close files
-  fclose (fb_fp);
-  if (fb_kurto_fp) fclose (fb_kurto_fp);
-  #if DOHISTO
-  fclose (histo_fp);
-  #endif
-  #if WRITE_KURTO
-  fclose (kurto_fp);
-  fclose (block_kurto_fp);
-  fclose (weight_fp);
-  #endif
-  uint64_t samps_written = (fb_bytes_written*(8/NBIT))/(CHANMAX-CHANMIN+1);
-  multilog (log, LOG_INFO, "Wrote %.2f MB (%.2f s) to %s\n",
-      fb_bytes_written*1e-6,samps_written*tsamp,fbfile);
-
-  float obs_time;
-  CUDA_PROFILE_STOP(obs_start,obs_stop,&obs_time);
-  multilog (log, LOG_INFO, "Proc Time...%.3f\n", obs_time*1e-3);
-
-  // TODO -- this can't happen, because we've already disconnected
-  // from the input buffer!  Moreover, it seems to be an infinite
-  // loop; take it out for now
-  if (0) {
-  // If there has been a major skip, need to continue to read from
-  // buffer so it doesn't fill up
-  //if (major_skip) {
+  // before disconnecting from input buffer, make sure we haven't aborted
+  // due to a skip; if we have, we need to keep reading from the buffer
+  // or else it will fill up and block forever
+  if (major_skip) {
     multilog (log, LOG_INFO, "Reading from buffer to clear major skip.\n");
     major_skip = 0;
+    // NB can't use ipcbuf_mark_cleared here because writer may write
+    // for an arbitrarily long time, so best just to read until the buffer
+    // is empty and eod is raised, viz nread==0
     while (true) {
       ssize_t nread = ipcio_read (hdu_in->data_block,frame_buff,VD_FRM);
       if (nread < 0 ) {
@@ -1261,6 +1287,31 @@ int main (int argc, char *argv[])
       }
     }
   }
+
+  dadacheck (dada_hdu_unlock_read (hdu_in));
+
+  #if PROFILE
+  cudaEventRecord(start,0);
+  #endif 
+
+  // close files
+  fclose (fb_fp); fb_fp = NULL;
+  if (fb_kurto_fp) fclose (fb_kurto_fp);
+  #if DOHISTO
+  fclose (histo_fp);
+  #endif
+  #if WRITE_KURTO
+  fclose (kurto_fp);
+  fclose (block_kurto_fp);
+  fclose (weight_fp);
+  #endif
+  uint64_t samps_written = (fb_bytes_written*(8/NBIT))/(CHANMAX-CHANMIN+1);
+  multilog (log, LOG_INFO, "Wrote %.2f MB (%.2f s) to %s\n",
+      fb_bytes_written*1e-6,samps_written*tsamp,fbfile);
+
+  float obs_time;
+  CUDA_PROFILE_STOP(obs_start,obs_stop,&obs_time);
+  multilog (log, LOG_INFO, "Proc Time...%.3f\n", obs_time*1e-3);
 
   // TODO -- if it was a scan observation and not long enough to complete a full cycle,, delete the file
   /*
@@ -1360,7 +1411,7 @@ int main (int argc, char *argv[])
   cudaEventDestroy (obs_start);
   cudaEventDestroy (obs_stop);
 
-  multilog (log, LOG_INFO, "Completed shutdown.");
+  multilog (log, LOG_INFO, "Completed shutdown.\n");
   multilog_close (log);
   fclose (logfile_fp);
 
