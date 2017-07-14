@@ -187,8 +187,7 @@ int main(int argc, char** argv)
 
   Connection raw;
   raw.alen = sizeof(raw.rem_addr);
-  // set socket size dynamically
-  //raw.sockoptval = 16*1024*1024; //size of data socket internal buffer
+  raw.sockoptval = 16*1024*1024; //size of data socket internal buffer
 
   // TODO -- make this for passing source information
   Connection ci;
@@ -243,7 +242,6 @@ int main(int argc, char** argv)
        "Cannot open raw socket on %s. Error code %d\n", dev, raw.svc);
     exit (EXIT_FAILURE);
   }
-  raw.sockoptval = 0;
   setsockopt (raw.svc, SOL_SOCKET, SO_RCVBUF, (char *)&(raw.sockoptval), 
       sizeof(raw.sockoptval));
   if (raw.svc > maxsock)
@@ -266,7 +264,9 @@ int main(int argc, char** argv)
   // Current solution is to simply skip enough frames that the buffer is
   // exhausted.  A better way might be to set the buffer to 0 size when
   // we aren't clocking samples, or to continually clock them in and use
-  // valid flags for start/stop of observation.
+  // valid flags for start/stop of observation.  However, tests with this
+  // suggest the OS doesn't actually change the buffer size, so we're stuck
+  // with the kluge.
   int skip_frames = 0;
   int write_header = 0;
   uint64_t packets_written = 0;
@@ -310,10 +310,6 @@ int main(int argc, char** argv)
         write_header = 1;
         multilog (log, LOG_INFO, "After dada_hdu_lock_write\n");
         fflush (logfile_fp);
-        // increase socket buffer sufficiently to collect samples
-        raw.sockoptval = 16*1024*1024;
-        setsockopt (raw.svc, SOL_SOCKET, SO_RCVBUF,
-            (char *)&(raw.sockoptval), sizeof(raw.sockoptval));
         cmd = CMD_NONE;
       }
       else if (cmd == CMD_EVENT) {
@@ -418,10 +414,6 @@ int main(int argc, char** argv)
             "[STATE_STARTED->STOP] Wrote %d packets to psrdada buffer.\n",packets_written);
         packets_written = 0;
         cmd = CMD_NONE;
-        // make socket drop all packets
-        raw.sockoptval = 0;
-        setsockopt (raw.svc, SOL_SOCKET, SO_RCVBUF,
-            (char *)&(raw.sockoptval), sizeof(raw.sockoptval));
         fflush (logfile_fp);
         continue;
       }
@@ -455,8 +447,10 @@ int main(int argc, char** argv)
 
           if (raw_bytes_read == BUFSIZE) {
 
-            //if (skip_frames <  25600*2) {
-            if (0) {
+            // this makes sure we read 0.5s of data from the buffer; based
+            // on the maximum requested raw socket size (2x16MB) this is
+            // more than enough to clear out any old data from the buffer
+            if (skip_frames <  25600) {
               skip_frames ++;
               continue;
             }
