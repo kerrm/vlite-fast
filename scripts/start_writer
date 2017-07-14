@@ -6,12 +6,7 @@
 # $2 = writer port
 # $3 = info port
 # $4 = baseband dada key
-/home/vlite-master/mtk/bin/dada_db -k ${4} -l -b 257638400 -n 8
-if [ $? -ne 0 ]
-then
-/home/vlite-master/mtk/bin/dada_db -k ${4} -d
-/home/vlite-master/mtk/bin/dada_db -k ${4} -l -b 257638400 -n 8
-fi
+/home/vlite-master/mtk/scripts/start_dada ${4} 257638400 8
 /home/vlite-master/mtk/src/writer -e ${1} -p ${2} -i ${3} -k ${4} -o
 # allow some time for buffer to empty before killing it
 sleep 5
