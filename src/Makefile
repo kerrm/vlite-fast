@@ -32,8 +32,8 @@ messenger:	messenger.c def.h utils.o $(PARSE_FILES)
 	chmod a+rx $@
 
 writer:	writer.c def.h utils.o
-	gcc -g -O2 -Wall -std=gnu99 -c writer.c -I../include -I$(INCDIFXMESSAGE)
-	gcc -o $@ writer.o utils.o -L../lib -lpsrdada
+	gcc -g -O2 -Wall -std=gnu99 -pthread -c writer.c -I../include -I$(INCDIFXMESSAGE)
+	gcc -o $@ writer.o utils.o -pthread -L../lib -lpsrdada -lvdifio
 	chmod a+rx $@
 
 util.o: util.h util.c

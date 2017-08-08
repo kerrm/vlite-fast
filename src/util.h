@@ -2,7 +2,7 @@
 #include <stdio.h>
 
 void dadacheck (int rcode);
-FILE* myopen (const char* fname, const char* mode="rb", bool do_remove=false);
+FILE* myopen (const char* fname, const char* mode="rb", bool do_remove=false, size_t bufsize=0);
 //
 //output functions, modified from sigproc.h
 void send_coords (double raj, double dej, double az, double za,FILE *output);

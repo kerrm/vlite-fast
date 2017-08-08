@@ -153,7 +153,6 @@ int main(int argc, char** argv)
   //int ant_on_src = 0;
   int recording = 0;
 
-
   ScanInfoDocument D; //multicast message struct
   const ObservationDocument *od;
   AlertDocument A; 
@@ -166,6 +165,12 @@ int main(int argc, char** argv)
   //char eventlogfile[] = "eventlog.txt";
   char msg[MSGMAXSIZE];
   char from[24]; //ip address of multicast sender
+
+  // keep track of previous pointing and combine observation if unchanged
+  double last_ra = 100;
+  double last_dec = 100;
+  double max_integ = 480;
+  time_t start_integ, stop_integ;
 
   FILE *sfd;//, *efd;
 
@@ -311,12 +316,12 @@ int main(int argc, char** argv)
       
       parseScanInfoDocument (&D, msg);
       printScanInfoDocument (&D);
+      multilog (log, LOG_INFO,
+          "Message type: %d = %s\n",D.type,ScanInfoTypeString[D.type]);
 
       // only do this part if not under manual control
       if (0==manual_control_port)
       {
-        multilog (log, LOG_INFO,
-            "Message type: %d = %s\n",D.type,ScanInfoTypeString[D.type]);
         if (D.type == SCANINFO_OBSERVATION) {
           od = &(D.data.observation);
     
@@ -353,18 +358,45 @@ int main(int argc, char** argv)
             multilog (log, LOG_INFO, "scanNo==1: ignoring DUMMY scan\n");
           else
           {
-            // TO ADD: Check that Readers/Writers are still connected before sending; change their isonnected elements if they are not
+
+            // TODO: Check that Readers/Writers are still connected
+            // before sending; change their isonnected elements if they 
+            // are not
+
             if (recording) {
+              // check to see if the pointing position has changed
+              if (od->ra==last_ra && od->dec==last_dec)
+              {
+                multilog (log, LOG_INFO,
+                    "Pointing unchanged, will continue to integrate.\n");
+                time (&stop_integ);
+                double dt = difftime (stop_integ, start_integ);
+                if (dt < max_integ)
+                  continue;
+                else
+                  multilog (log, LOG_INFO,
+                      "Integration exceeded %lf s, starting a new one.\n",
+                      max_integ);
+              }
+
               multilog (log, LOG_INFO, "sending STOP command\n");
               for(int ii=0; ii<nvconf; ++ii) {
-                if (send(cw[ii].svc, cmdstop, 1, 0) == -1)
+                if (send (cw[ii].svc, cmdstop, 1, 0) == -1)
                   multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
               }
               // this is empirical, but seems to be long enough to allow
-              // messages to propagate
+              // messages to propagate before sending the next command;
+              // can also avoid this by altering wait_for_cmd to not discard
+              // the older commands
               nanosleep (&ts_500ms, NULL);
             }
+
+            // update pointing position and reset integration timer
+            last_ra = od->ra;
+            last_dec = od->dec;
+            time (&start_integ);
             multilog (log, LOG_INFO,"sending START command\n");
+
             for (int ii=0; ii<nvconf; ++ii) {
               if (send (cr[ii].svc, cmdstart, 1, 0) == -1)
                 multilog (log, LOG_ERR,

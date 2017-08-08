@@ -430,3 +430,17 @@ struct timespec get_ms_ts (int ms)
   ts.tv_nsec = ms*1e6;
   return ts;
 }
+
+time_t vdif_to_unixepoch (vdif_header* vdhdr)
+{
+  struct tm tm_epoch = {0};
+  int vdif_epoch = getVDIFEpoch (vdhdr);
+  tm_epoch.tm_year = 100 + vdif_epoch/2;
+  tm_epoch.tm_mon = 6*(vdif_epoch%2);
+  tm_epoch.tm_mday = 1;
+  time_t epoch_seconds = mktime (&tm_epoch) + 
+              getVDIFFrameEpochSecOffset (vdhdr);
+  return epoch_seconds;
+  //gmtime_r (&epoch_seconds,&tm_epoch);
+  //return tm_epoch;
+}

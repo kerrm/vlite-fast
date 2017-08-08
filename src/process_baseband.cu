@@ -73,8 +73,8 @@ void change_extension (const char* in, char* out, const char* oldext, const char
     snprintf (substr, 256-strlen(out)-1, newext);  
 }
 
-// TODO -- make sure this is consistent with sigproc, specifically for time
-int write_psrdada_header (dada_hdu_t* hdu, char* inchdr, int npol, char* fb_file)
+// TODO -- check that this is consistent with sigproc
+int write_psrdada_header (dada_hdu_t* hdu, char* inchdr, vdif_header* vdhdr, int npol, char* fb_file)
 {
 
   // handle values from incoming header; set defaults if not available
@@ -89,9 +89,14 @@ int write_psrdada_header (dada_hdu_t* hdu, char* inchdr, int npol, char* fb_file
   name[OBSERVATION_NAME_SIZE-1] = '\0';
   double start = 0;
   ascii_header_get (inchdr, "SCANSTART", "%lf", &start);
-  char dada_utc[64];
-  ascii_header_get (inchdr, "UTC_START", "%s", dada_utc);
-  dada_utc[63] = '\0';
+
+  // update the time with the actual data start, since we have discarded
+  // some data to reach a 1s boundary
+  time_t epoch_seconds = vdif_to_unixepoch (vdhdr);
+  struct tm utc_time;
+  localtime_r (&epoch_seconds, &utc_time);
+  char dada_utc[DADA_TIMESTR_LENGTH];
+  strftime (dada_utc, DADA_TIMESTR_LENGTH, DADA_TIMESTR, &utc_time);
 
   // initialize observation parameters for filterbank
   // NB the data are upper sideband, so negative channel bandwidth
@@ -116,6 +121,13 @@ int write_psrdada_header (dada_hdu_t* hdu, char* inchdr, int npol, char* fb_file
   dadacheck (ascii_header_set (ascii_hdr, "NBIT", "%d", NBIT) );
   dadacheck (ascii_header_set (ascii_hdr, "TSAMP", "%lf", tsamp) );
   dadacheck (ascii_header_set (ascii_hdr, "UTC_START", "%s", dada_utc) );
+  // also record the VDIF MJD info, this is useful for finding
+  // transients in the baseband stream.
+  dadacheck (ascii_header_set (ascii_hdr, "VDIF_MJD", "%d", 
+      getVDIFFrameMJD (vdhdr)) );
+  dadacheck (ascii_header_set (ascii_hdr, "VDIF_SEC", "%lu", 
+      getVDIFFrameMJDSec (vdhdr)) );
+
   if (fb_file)
     dadacheck (ascii_header_set (ascii_hdr, "SIGPROC_FILE", "%s", fb_file) );
   multilog (hdu->log, LOG_INFO, "%s",ascii_hdr);
@@ -166,7 +178,7 @@ int write_sigproc_header (FILE* output_fp, char* inchdr, vdif_header* vdhdr,int 
   send_double ("tsamp",tsamp,output_fp);//[sec]
   send_int ("nifs",npol,output_fp);
   send_string ("HEADER_END",output_fp);
-  return 0;
+  return station_id;
 }
 
 
@@ -176,13 +188,10 @@ void get_fbfile (char* fbfile, ssize_t fbfile_len, char* inchdr, vdif_header* vd
   int station_id = 0;
   ascii_header_get (inchdr, "STATIONID", "%d", &station_id);
   char currt_string[128];
-  struct tm tm_epoch = {0};
-  int vdif_epoch = getVDIFEpoch (vdhdr);
-  tm_epoch.tm_year = 100 + vdif_epoch/2;
-  tm_epoch.tm_mon = 6*(vdif_epoch%2);
-  time_t epoch_seconds = mktime (&tm_epoch) + getVDIFFrameEpochSecOffset (vdhdr);
-  struct tm* utc_time = gmtime (&epoch_seconds);
-  strftime (currt_string,sizeof(currt_string), "%Y%m%d_%H%M%S", utc_time);
+  time_t epoch_seconds = vdif_to_unixepoch(vdhdr);
+  struct tm utc_time;
+  gmtime_r (&epoch_seconds, &utc_time);
+  strftime (currt_string,sizeof(currt_string), "%Y%m%d_%H%M%S", &utc_time);
   *(currt_string+15) = 0;
   if (CHANMIN < 2411)
     snprintf (fbfile,fbfile_len,"%s/%s_muos_ea%02d.fil",DATADIR,currt_string,station_id);
@@ -327,7 +336,7 @@ int main (int argc, char *argv[])
   char logfile[128];
   time_t currt = time (NULL);
   struct tm tmpt; 
-  localtime_r (&currt, &tmpt);
+  gmtime_r (&currt, &tmpt);
   char currt_string[32];
   strftime (currt_string,sizeof(currt_string), "%Y%m%d_%H%M%S", &tmpt);
   currt_string[15] = 0;
@@ -769,11 +778,11 @@ int main (int argc, char *argv[])
 
   // write out psrdada header; NB this locks the hdu for writing
   if (key_out)
-    write_psrdada_header (hdu_out[active_buffer], incoming_hdr, npol, 
-      heimdall_file);
+    write_psrdada_header (hdu_out[active_buffer], incoming_hdr, vdhdr,
+      npol, heimdall_file);
 
   // write out a sigproc header
-  write_sigproc_header (fb_fp, incoming_hdr, vdhdr, npol);
+  int station_id = write_sigproc_header (fb_fp, incoming_hdr, vdhdr, npol);
   if (2 == RFI_MODE)
     write_sigproc_header (fb_kurto_fp, incoming_hdr, vdhdr, npol);
 
@@ -910,7 +919,8 @@ int main (int argc, char *argv[])
       }
       char heimdall_cmd[256];
       // NB need to redirect stderr or else we can't catch it
-      snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 62500 -gpu_id 0 -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -k %x", key_out + active_buffer*2); 
+      //snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 45000 -gpu_id 0 -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -beam %d -k %x -coincidencer vlite-nrl:27555", station_id, key_out + active_buffer*2); 
+      snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 45000 -gpu_id 0 -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -beam %d -k %x", station_id, key_out + active_buffer*2); 
       multilog (log, LOG_INFO, "%s\n", heimdall_cmd);
       heimdall_fp[active_buffer] = popen (heimdall_cmd, "r");
       heimdall_launched = true;
@@ -1410,6 +1420,13 @@ int main (int argc, char *argv[])
   #endif
   cudaEventDestroy (obs_start);
   cudaEventDestroy (obs_stop);
+
+  // finish any heimdall processing
+  for (int ibuff=0; ibuff < NOUTBUFF; ibuff++)
+  {
+    if (heimdall_fp[ibuff])
+      pclose (heimdall_fp[ibuff]);
+  }
 
   multilog (log, LOG_INFO, "Completed shutdown.\n");
   multilog_close (log);

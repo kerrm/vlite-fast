@@ -2,6 +2,10 @@
 #include <signal.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <pthread.h>
 
 #include "dada_def.h"
 #include "dada_hdu.h"
@@ -42,7 +46,6 @@ void dadacheck (int rcode)
 
 int write_psrdada_header(dada_hdu_t* hdu, vdif_header* hdr, ObservationDocument* od)
 {
-  // big TODO is to get the information from the messenger process
   char* ascii_hdr = ipcbuf_get_next_write (hdu->header_block);
   int station_id = getVDIFStationID (hdr);
   dadacheck (ascii_header_set (ascii_hdr, "STATIONID", "%d",station_id) );
@@ -106,6 +109,59 @@ void print_observation_document(char* result, ObservationDocument* od)
   strcat(result,s);
 }
 
+typedef struct {
+  
+  char* buf;          // address to buffer to copy
+  uint64_t bufsz;     // size of buffer in bytes
+  char fname[256];    // name of output file
+  int status;         // status: -1 == working, 0 == success, >0 == error
+  pthread_t tid;      // the thread context
+
+} threadio_t;
+
+static threadio_t** threadios = NULL;
+static int nthreadios = 0;
+
+void* buffer_dump (void* mem)
+{
+  threadio_t* tio = (threadio_t*) mem;
+  tio->status = -1;
+  
+  // malloc enough memory for local copy
+  char* mybuff = malloc (tio->bufsz);
+  if (NULL==mybuff)
+  {
+    tio->status = 1; // 1 encodes failed memory copy
+    return NULL;
+  }
+
+  memcpy (mybuff, tio->buf, tio->bufsz);
+
+  // dump to disk
+  int fd = open (tio->fname, O_WRONLY | O_CREAT);
+  uint64_t written = 0;
+  while (written < tio->bufsz)
+  {
+    ssize_t result = write (fd, mybuff+written, tio->bufsz-written);
+    if (result < 0)
+    {
+      if (EINTR != errno)
+      {
+        tio->status = 2;
+        free (mybuff);
+        return NULL;
+      }
+      // TODO -- need to sleep if interrupted?
+    }
+    else
+      written += result;
+  }
+  fsync (fd);
+  free (mybuff);
+  tio->status = 0;
+  return NULL;
+}
+
 int main(int argc, char** argv)
 {
   // register SIGINT handling
@@ -122,7 +178,7 @@ int main(int argc, char** argv)
   char dev[16] = ETHDEV;
   char hostname[MAXHOSTNAME];
   gethostname(hostname,MAXHOSTNAME);
-  char *starthost = strstr(hostname, "difx");
+  //char *starthost = strstr(hostname, "difx");
   
   int state = STATE_STOPPED;
   uint64_t port = WRITER_SERVICE_PORT;
@@ -274,7 +330,7 @@ int main(int argc, char** argv)
   ssize_t raw_bytes_read = 0;
   ssize_t ipcio_bytes_written = 0;
 
-  while(1) {
+  while (1) {
 
     if (state == STATE_STOPPED) {
       if (cmd == CMD_NONE)
@@ -347,58 +403,112 @@ int main(int argc, char** argv)
       }
 
       if (cmd == CMD_EVENT) {
-        //close data block
-        if (dada_hdu_unlock_write (hdu) < 0) {
-          multilog (log, LOG_ERR, "unable to unlock psrdada HDU, exiting\n");
-          exit (EXIT_FAILURE);
-        }
-        //fprintf(stderr,"after dada_hdu_unlock_write\n");
         
-        //dump DB to file
+        cmd = CMD_NONE;
+        // dump voltages to file
+        
+        // check to see if there is a previous dump ongoing
+        int ready_to_write = 1;
+
+        for (int iio=0; iio < nthreadios; ++iio)
+        {
+          if (threadios[iio]->status != 0)
+          {
+            // previous dump still happening
+            multilog (log, LOG_INFO,
+                "Previous I/O still ongoing, skipping this CMD_EVENT.");
+            ready_to_write = 0;
+            break;
+          }
+          if (threadios[iio]->status > 0)
+          {
+            // some problem with previous dump; skip new dumps for now
+            multilog (log, LOG_ERR,
+                "Previous I/O errored, skipping this CMD_EVENT.");
+            ready_to_write = 0;
+            break;
+          }
+        }
+
+        if (!ready_to_write)
+          continue;
+
+        multilog (log, LOG_INFO, "Launching threads for buffer dump.\n");
+
+        // free previous structs
+        for (int iio=0; iio < nthreadios; ++iio)
+          free (threadios[iio]);
+        free (threadios);
+
+        // determine which buffers to write
+        ipcbuf_t* buf = (ipcbuf_t *) hdu->data_block;; 
+        char** buffer = buf->buffer;
+        int nbufs = ipcbuf_get_nbufs(buf);
+        int bufsz = ipcbuf_get_bufsz(buf);
+
+        // for testing, pretend trigger time is current time; 6s transient
+        time_t trigger_time = time (NULL);
+        double trigger_len = 6;
+        time_t tmin = trigger_time - 8;
+        time_t tmax = trigger_time + trigger_len + 8;
+        char* bufs_to_write[32] = {NULL};
+
+        nthreadios = 0;
+        for (int ibuf=0; ibuf < nbufs; ++ibuf)
+        {
+          // get time for frame at start of buffer
+          vdif_header* vdhdr = (vdif_header*) buffer[ibuf];
+          time_t utc_seconds = vdif_to_unixepoch (vdhdr);
+          // TMP
+          char dada_utc[32];
+          struct tm utc_time;
+          gmtime_r (&utc_seconds, &utc_time);
+          strftime (dada_utc, 64, DADA_TIMESTR, &utc_time);
+          if (ibuf==0)
+            fprintVDIFHeader(stderr, vdhdr, VDIFHeaderPrintLevelColumns);
+          multilog (log, LOG_INFO, "buffer UTC %s\n", dada_utc);
+          fprintVDIFHeader (stderr, vdhdr, VDIFHeaderPrintLevelShort);
+          // end TMP
+          if ((utc_seconds >= tmin) && (utc_seconds <= tmax))
+          {
+            // dump this buffer
+            bufs_to_write[nthreadios++] = buffer[ibuf];
+            multilog (log, LOG_INFO, "dumping buffer %02d\n", ibuf);
+          }  
+        }
+
+        // TODO -- replace this file name with appropriate format
         currt = time (NULL);
-        localtime_r (&currt,&tmpt);
-        strftime (currt_string,sizeof(currt_string), "%Y%m%d_%H%M%S", &tmpt);
+        gmtime_r (&currt,&tmpt);
+        strftime (
+            currt_string,sizeof(currt_string), "%Y%m%d_%H%M%S", &tmpt);
         *(currt_string+15) = 0;
-        char eventfile[128];
-        snprintf (eventfile, 128,
-            "%s/%s%s_%s_ev.out",EVENTDIR,starthost,dev,currt_string);
-        
-        if (access (eventfile,F_OK) !=-1)
-          remove (eventfile);
-        FILE* evfd = fopen (eventfile, "wb");
-        if (NULL==evfd)
-        {
-          multilog (log, LOG_ERR, "Unable to open %s, aborting.\n",eventfile);
-          exit (EXIT_FAILURE);
-        }
-        multilog (log, LOG_INFO, "Dumping buffer to %s.\n", eventfile);
-        event_to_file (hdu->data_block,evfd);
-        fclose (evfd);
-        multilog (log, LOG_INFO, "Finished dumping buffer to %s.\n", eventfile);
+        multilog (log, LOG_INFO, "GM time is %s\n", currt_string);
 
-        //Get pending commands, resume writing to ring buffer if there are none
-        // MTK -- no, stay stopped after an event for now
-        FD_ZERO (&readfds);
-        FD_SET (c.rqst, &readfds);
-        FD_SET (raw.svc, &readfds);
-        if (select (maxsock+1,&readfds,NULL,NULL,&tv_500mus) < 0)
+        // make new threadio_ts and pthreads
+        threadios = malloc (sizeof (threadio_t*) * nthreadios);
+        for (int iio=0; iio < nthreadios; ++iio)
         {
-          multilog (log, LOG_ERR, "Error calling select.\n");
-          exit (EXIT_FAILURE);
+          threadios[iio] = malloc (sizeof (threadio_t));
+          threadios[iio]->status = -1;
+          threadios[iio]->buf = bufs_to_write[iio];
+          threadios[iio]->bufsz = bufsz;
+          int sid = getVDIFStationID ((vdif_header*)bufs_to_write[iio]);
+          snprintf (threadios[iio]->fname, 255,
+              "%s/%s_ea%02d_buff%02d.vdif",
+              EVENTDIR,currt_string,sid,iio);
+          if (pthread_create (&threadios[iio]->tid, NULL, &buffer_dump, 
+              (void*)threadios[iio]) != 0)
+              multilog (log, LOG_ERR, "pthread_create failed\n");
+          if (pthread_detach (threadios[iio]->tid) != 0)
+              multilog (log, LOG_ERR, "pthread_detach failed\n");
         }
 
-        state = STATE_STOPPED;
-        if (FD_ISSET (c.rqst,&readfds)) {
-          cmd = wait_for_cmd (&c, logfile_fp);
-          multilog (log, LOG_ERR,
-              "Writer: flushed out command socket after event_to_file.\n");
-        }
-        // stay stopped
-        else
-          cmd = CMD_NONE; 
-        
-        continue; 
-      }
+        // and we're done
+        multilog (log, LOG_INFO,
+            "Launched %d threads for buffer dump.\n", nthreadios);
+
+      } // end CMD_EVENT logic
       
       //CMD_STOP --> change state to STOPPED, close data block
       else if (cmd == CMD_STOP) {
@@ -498,6 +608,10 @@ int main(int argc, char** argv)
       "dada_hdu_disconnect result = %d.\n", dada_hdu_disconnect (hdu));
   fclose (logfile_fp);
   //change_file_owner (logfile_fp, "vliteops");
+
+  for (int iio=0; iio < nthreadios; ++iio)
+    free (threadios[iio]);
+  free (threadios);
 
   return exit_status;
 } // end main

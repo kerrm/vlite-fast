@@ -5,11 +5,14 @@
 void dadacheck (int rcode)
 {
   if (rcode < 0)
+  {
+    fprintf (stderr, "dadacheck failed\n");
     throw 20;
+  }
 }
 
 
-FILE* myopen(const char* fname, const char* mode, bool do_remove)
+FILE* myopen(const char* fname, const char* mode, bool do_remove, size_t bufsize)
 {
   if (do_remove && access(fname,F_OK)!=-1 )
     remove (fname);
@@ -19,7 +22,27 @@ FILE* myopen(const char* fname, const char* mode, bool do_remove)
     fprintf (stderr, "Unable to open %s, aborting.\n",fname);
     exit (EXIT_FAILURE);
   }
-  return(fp);
+  if (bufsize)
+    setvbuf (fp, NULL, _IOFBF, bufsize);
+  return (fp);
+}
+
+void myfwrite_byte (FILE* fp, void* buff, size_t nelem)
+{
+  if (fwrite (buff,1,nelem,fp) != nelem)
+  {
+    fprintf (stderr, "fwrite failed to write %ld bytes.\n",nelem);
+    exit (EXIT_FAILURE);
+  }
+}
+
+void myfwrite_float (FILE* fp, float* buff, size_t nelem)
+{
+  if (fwrite ((void*)buff,sizeof(float),nelem,fp) != nelem)
+  {
+    fprintf (stderr, "fwrite failed to write %ld floats.\n",nelem);
+    exit (EXIT_FAILURE);
+  }
 }
 
 void send_string(const char *string, FILE *output)
