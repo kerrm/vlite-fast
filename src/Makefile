@@ -8,6 +8,7 @@ PARSE_HEADERS = efaults.h  eop.h  executor.h  options.h  vlaant.h  vlite_xml.h m
 #F77 = gfortran -std=legacy -ffixed-line-length-none 
 CC = gcc
 NVCC = nvcc
+CUDA_ARCH = -gencode arch=compute_35,code=sm_35 -gencode arch=compute_52,code=sm_52 -gencode arch=compute_61,code=sm_61
 
 all: process_baseband genbase readbase messenger writer
 
@@ -15,10 +16,10 @@ process_baseband: process_baseband.o util.o cuda_util.o utils.o
 	$(NVCC) -o process_baseband process_baseband.o utils.o util.o cuda_util.o -lcufft -lcurand -L../lib -lvdifio -lpsrdada
 
 process_baseband.o: process_baseband.cu process_baseband.h
-	$(NVCC) -g -O2 -gencode arch=compute_35,code=sm_35 --compiler-options -Wall -c -o $@ -I/usr/cuda-6.5/include -I../include process_baseband.cu 
+	$(NVCC) -g -O2 $(CUDA_ARCH) --compiler-options -Wall -c -o $@ -I/usr/cuda/include -I../include process_baseband.cu 
 
 genbase: genbase.cu util.o cuda_util.o
-	$(NVCC) -g -O2 -gencode arch=compute_35,code=sm_35 --compiler-options -Wall -I/usr/cuda-6.5/include -I/usr/cuda-6.5/samples/common/inc -I/users/mkerr/mtk/include -c genbase.cu
+	$(NVCC) -g -O2 $(CUDA_ARCH) --compiler-options -Wall -I/usr/cuda/include -I/usr/cuda/samples/common/inc -I/users/mkerr/mtk/include -c genbase.cu
 	$(NVCC) -o genbase util.o cuda_util.o genbase.o -lcufft -lcurand -L../lib -lvdifio -lpsrdada
 
 readbase:	readbase.c util.o
@@ -40,7 +41,7 @@ util.o: util.h util.c
 	g++ -g -O2 -Wall -c util.c -I../include
 
 cuda_util.o: cuda_util.h cuda_util.cu
-	$(NVCC) -g -O2 --compiler-options -Wall -c -o $@ -I/usr/cuda-6.5/include -I../include cuda_util.cu
+	$(NVCC) -g -O2 --compiler-options -Wall -c -o $@ -I/usr/cuda/include -I../include cuda_util.cu
 
 utils.o: utils.h utils.c Connection.h
 	gcc -g -O2 -Wall -std=gnu99 -c -o $@ utils.c -I../include

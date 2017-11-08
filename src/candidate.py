@@ -1,10 +1,4 @@
-
 import numpy as np
-#import pylab as pl
-#import pysigproc
-#from sigpyproc.Readers import FilReader
-#import glob
-#import os
 
 class Candidate(object):
 
@@ -59,7 +53,7 @@ class Candidate(object):
         return self.i0 < other.i1
 
     def __str__(self):
-        print '%d %d %.2f %.2f'%(self.i0,self.i1,self.sn,self.dm)
+        return 'i0=%d i1=%d w=%.2f sn=%.2f dm=%.2f'%(self.i0,self.i1,self.width*1000,self.sn,self.dm)
 
 def coincidence (all_cands,delta_dm=0.1):
 

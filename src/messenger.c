@@ -5,6 +5,7 @@
 #include <signal.h>
 #include <time.h>
 #include <errno.h>
+#include <math.h>
 
 #include "utils.h"
 #include "multicast.h"
@@ -364,11 +365,15 @@ int main(int argc, char** argv)
             // are not
 
             if (recording) {
-              // check to see if the pointing position has changed
-              if (od->ra==last_ra && od->dec==last_dec)
+              // check to see if the pointing position has changed; tweak
+              // this to allow for small changes to keep integrating during
+              // VLASS
+              if ((fabs(od->ra-last_ra)< 0.5) && fabs(od->dec-last_dec) < 0.5)
               {
                 multilog (log, LOG_INFO,
                     "Pointing unchanged, will continue to integrate.\n");
+                last_ra = od->ra;
+                last_dec = od->dec;
                 time (&stop_integ);
                 double dt = difftime (stop_integ, start_integ);
                 if (dt < max_integ)

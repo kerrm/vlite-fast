@@ -74,7 +74,7 @@ int main(int argc, char *argv[])
   struct tm tm_epoch = {0};
   int vdif_epoch = getVDIFEpoch (hdr);
   tm_epoch.tm_year = 100 + vdif_epoch/2;
-  tm_epoch.tm_mon = 6*(vdif_epoch%2);
+  tm_epoch.tm_mon = 6*(vdif_epoch%2)-1;
   time_t epoch_seconds = mktime (&tm_epoch) + getVDIFFrameEpochSecOffset (hdr);
   struct tm* utc_time = gmtime (&epoch_seconds);
   char dada_utc[64];

@@ -36,7 +36,7 @@ def trigger(all_cands,snthresh=8,minbeam=2,wmax=0.01,dmmin=100):
     for cand in all_cands:
         nbeam = cand.beam_mask.sum() 
         coincident_count += nbeam > 1
-        c1 = nbeam > minbeam
+        c1 = nbeam >= minbeam
         c2 = cand.width < wmax
         c3 = cand.dm > dmmin
         c4 = cand.sn > snthresh
@@ -66,9 +66,17 @@ if __name__ == '__main__':
             payload.append(msg)
         lines = filter(lambda l: len(l) > 0,
             map(str.strip,''.join(payload).split('\n')))
+        print lines[0]
+        for line in lines[1:]:
+            print Candidate(None,line)
+
+        # do I want empty entries?
+        if len(lines) == 1:
+            continue
 
         # this is file start
         toks = lines[0].split()
+        # NB at least right now this appears to be local time
         utc = toks[0]
         beam = int(toks[3]) - 1 # heimdall wants 0-base
 
@@ -78,18 +86,20 @@ if __name__ == '__main__':
 
         cgroups = utc_groups[utc]
 
+
         # add in Candidate objects to the appropriate beam
         cgroups[beam].extend((Candidate(None,l) for l in lines[1:]))
         if len(cgroups.keys()) < 2:
-            print 'Only one beam, skipping coincidence/triggering.'
-            continue
+            #print 'Only one beam, skipping coincidence/triggering.'
+            #continue
+            pass
 
         # coincidence them
         all_cands = coincidence(cgroups.values())
 
         # get triggers
         sent_triggers = utc_sent_triggers[utc]
-        triggers = set(trigger(all_cands)).difference(sent_triggers)
+        triggers = set(trigger(all_cands,minbeam=1)).difference(sent_triggers)
 
         if len(triggers) == 0:
             continue
@@ -97,16 +107,16 @@ if __name__ == '__main__':
         # group up triggers within MAX_DUMP seconds
         # for now, just allow one trigger per processing block (~30s)
         # could loop over sent triggers if needed
-        i0 = min((t.i0 for i0 in triggers))
+        i0 = min((t.i0 for t in triggers))
         i1 = -1
-        for trigger in triggers:
-            if (trigger.i1 - i0)*trigger.tsamp < MAX_DUMP:
-                sent_triggers.add(trigger)
-                i1 = max(i1,trigger.i1)
+        for trig in triggers:
+            if (trig.i1 - i0)*trig.tsamp < MAX_DUMP:
+                sent_triggers.add(trig)
+                i1 = max(i1,trig.i1)
 
         # send a trigger based on active_utc, i0, i1        
-        dump_offs = int(i1*tsamp)
-        dump_len = int( (i1-i0)*tsamp ) + 1
+        dump_offs = int(i1*trig.tsamp)
+        dump_len = int( (i1-i0)*trig.tsamp ) + 1
 
-        print 'Sending trigger for UTC %s with offset %d and length %d.'%(active_utc,dump_offs,dump_len)
+        print 'Sending trigger for UTC %s with offset %d and length %d.'%(utc,dump_offs,dump_len)
 

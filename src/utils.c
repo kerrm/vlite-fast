@@ -440,7 +440,11 @@ time_t vdif_to_unixepoch (vdif_header* vdhdr)
   tm_epoch.tm_mday = 1;
   time_t epoch_seconds = mktime (&tm_epoch) + 
               getVDIFFrameEpochSecOffset (vdhdr);
-  return epoch_seconds;
-  //gmtime_r (&epoch_seconds,&tm_epoch);
-  //return tm_epoch;
+  // correct for time zone offset in mktime
+  struct tm unix_epoch = {0};
+  unix_epoch.tm_year = 70;
+  unix_epoch.tm_mon = 0;
+  unix_epoch.tm_mday = 1;
+  time_t local_offset = mktime(&unix_epoch);
+  return epoch_seconds-local_offset;
 }

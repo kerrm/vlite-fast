@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <pthread.h>
+#include <sys/stat.h>
 
 #include "dada_def.h"
 #include "dada_hdu.h"
@@ -138,7 +139,7 @@ void* buffer_dump (void* mem)
   memcpy (mybuff, tio->buf, tio->bufsz);
 
   // dump to disk
-  int fd = open (tio->fname, O_WRONLY | O_CREAT);
+  int fd = open (tio->fname, O_WRONLY | O_CREAT, 0664);
   uint64_t written = 0;
   while (written < tio->bufsz)
   {
@@ -157,7 +158,12 @@ void* buffer_dump (void* mem)
       written += result;
   }
   fsync (fd);
+  // needed since we don't reset umask, which is 0027
+  fchmod (fd, 0664);
+  close (fd);
   free (mybuff);
+  // hardcode for now vliteops=6362, vlite=5636
+  chown (tio->fname, 6362, 5636);
   tio->status = 0;
   return NULL;
 }
@@ -446,11 +452,13 @@ int main(int argc, char** argv)
         int nbufs = ipcbuf_get_nbufs(buf);
         int bufsz = ipcbuf_get_bufsz(buf);
 
-        // for testing, pretend trigger time is current time; 6s transient
-        time_t trigger_time = time (NULL);
-        double trigger_len = 6;
+        // for testing, pretend trigger time is current time -14s
+        // with a 20s transient
+        time_t trigger_time = time (NULL) - 28;
+        double trigger_len = 20;
         time_t tmin = trigger_time - 8;
         time_t tmax = trigger_time + trigger_len + 8;
+        printf ("tmin = %ld tmax = %ld\n",tmin,tmax);
         char* bufs_to_write[32] = {NULL};
 
         nthreadios = 0;
@@ -467,6 +475,7 @@ int main(int argc, char** argv)
           if (ibuf==0)
             fprintVDIFHeader(stderr, vdhdr, VDIFHeaderPrintLevelColumns);
           multilog (log, LOG_INFO, "buffer UTC %s\n", dada_utc);
+          printf ("utc_seconds = %ld\n",utc_seconds);
           fprintVDIFHeader (stderr, vdhdr, VDIFHeaderPrintLevelShort);
           // end TMP
           if ((utc_seconds >= tmin) && (utc_seconds <= tmax))

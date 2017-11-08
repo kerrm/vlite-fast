@@ -43,6 +43,7 @@ void usage ()
 	  "-P number of output polarizations (1=AA+BB, 2=AA,BB; 4 not implemented)\n"
 	  "-r RFI-excision mode (0=no excision, 1=only excision, 2=[default]write both data sets)\n"
     "-s process a single observation, then quit (used for debugging)\n"
+    "-g run on specified GPU\n"
 	  //"-m retain MUOS band\n"
 	  ,(uint64_t)READER_SERVICE_PORT);
 }
@@ -94,7 +95,7 @@ int write_psrdada_header (dada_hdu_t* hdu, char* inchdr, vdif_header* vdhdr, int
   // some data to reach a 1s boundary
   time_t epoch_seconds = vdif_to_unixepoch (vdhdr);
   struct tm utc_time;
-  localtime_r (&epoch_seconds, &utc_time);
+  gmtime_r (&epoch_seconds, &utc_time);
   char dada_utc[DADA_TIMESTR_LENGTH];
   strftime (dada_utc, DADA_TIMESTR_LENGTH, DADA_TIMESTR, &utc_time);
 
@@ -217,9 +218,10 @@ int main (int argc, char *argv[])
   int RFI_MODE=2;
   int major_skip = 0;
   int single_pass = 0;  
+  int gpu_id = 0;
 
   int arg = 0;
-  while ((arg = getopt(argc, argv, "hk:K:p:omw:b:P:r:s")) != -1) {
+  while ((arg = getopt(argc, argv, "hk:K:p:omw:b:P:r:sg:")) != -1) {
 
     switch (arg) {
 
@@ -303,12 +305,24 @@ int main (int argc, char *argv[])
       single_pass = 1;
       break;
 
+    case 'g':
+      if (sscanf (optarg, "%d", &gpu_id) != 1) {
+        fprintf (stderr, "writer: could not parse GPU id %s\n", optarg);
+        return -1;
+      }
+      if (!(gpu_id==0 || gpu_id==1)) {
+        fprintf (stderr, "Unsupported GPU id!\n");
+        return -1;
+      }
+      break;
+
     }
   }
 
-  cudacheck (cudaSetDevice (DEVICE));
+  cudacheck (cudaSetDevice (gpu_id));
+  printf ("Setting CUDA device to %d.\n",gpu_id);
   int nsms;
-  cudaDeviceGetAttribute (&nsms,cudaDevAttrMultiProcessorCount,DEVICE);
+  cudaDeviceGetAttribute (&nsms,cudaDevAttrMultiProcessorCount,gpu_id);
 
   struct timespec ts_1ms = get_ms_ts (1);
   struct timespec ts_10s = get_ms_ts (10000);
@@ -919,8 +933,8 @@ int main (int argc, char *argv[])
       }
       char heimdall_cmd[256];
       // NB need to redirect stderr or else we can't catch it
-      //snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 45000 -gpu_id 0 -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -beam %d -k %x -coincidencer vlite-nrl:27555", station_id, key_out + active_buffer*2); 
-      snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 45000 -gpu_id 0 -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -beam %d -k %x", station_id, key_out + active_buffer*2); 
+      snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 45000 -gpu_id %d -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -beam %d -k %x -coincidencer vlite-nrl:27555", gpu_id, station_id, key_out + active_buffer*2); 
+      //snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 45000 -gpu_id 0 -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -beam %d -k %x", station_id, key_out + active_buffer*2); 
       multilog (log, LOG_INFO, "%s\n", heimdall_cmd);
       heimdall_fp[active_buffer] = popen (heimdall_cmd, "r");
       heimdall_launched = true;
@@ -1002,6 +1016,7 @@ int main (int argc, char *argv[])
         cudaEventRecord (start,0);
         #endif
 
+        // calculate high time resolution kurtosis (250 or 500 samples)
         kurtosis <<<nkurto_per_chunk, 256>>> (
             fft_in,kur_dev,kur_dev+nkurto_per_chunk);
         cudacheck (cudaGetLastError () );
@@ -1011,7 +1026,7 @@ int main (int argc, char *argv[])
             kur_dev+nkurto_per_chunk,dag_dev,nkurto_per_chunk);
         cudacheck (cudaGetLastError () );
 
-        // do the same for block level
+        // calculate coarser kurtosis (for entire filterbank sample, e.g. 12500 samples)
         block_kurtosis <<<fft_per_chunk/8,256>>> (
             kur_dev,kur_dev+nkurto_per_chunk,dag_dev,
             kur_fb_dev,kur_fb_dev+fft_per_chunk);
@@ -1688,7 +1703,7 @@ __global__ void apply_kurtosis (cufftReal *in, cufftReal *out, cufftReal *dag, c
         out[offset + tid + 250] = in[offset + tid + 250];
     }
 
-    // add one to the filterbank block samples
+    // add one to the filterbank block samples for weights
     if (tid==0)
       atomicAdd (norms + (blockIdx.x*NKURTO)/NFFT, float(NKURTO)/NFFT);
   }
@@ -1889,10 +1904,12 @@ __global__ void tscrunch (cufftComplex *fft_out, cufftReal* fft_ave,size_t n)
       i += blockDim.x*gridDim.x)
   {
     // explicit calculation of indices for future reference
+    ///////////////////////////////////////////////////////
     //int out_time_idx = i/NCHAN;
     //int out_chan_idx = i - out_time_idx*NCHAN;
     //int src_idx = out_time_idx * NSCRUNCH* NCHAN + out_chan_idx;
     //int src_idx = i+(NSCRUNCH-1)*out_time_idx*NCHAN;
+    ///////////////////////////////////////////////////////
     int src_idx = i+(NSCRUNCH-1)*(i/NCHAN)*NCHAN;
     fft_ave[i] = 0.;
     for (int j=0; j < NSCRUNCH; ++j, src_idx += NCHAN)
@@ -1914,10 +1931,12 @@ __global__ void tscrunch_weights (cufftComplex *fft_out, cufftReal* fft_ave, cuf
   {
 
     // explicit calculation of indices for future reference
+    ///////////////////////////////////////////////////////
     // int out_time_idx = i/NCHAN;
     // int out_chan_idx = i - out_time_idx*NCHAN;
     // int src_idx = out_time_idx * NSCRUNCH* NCHAN + out_chan_idx;
     // int src_idx = i+(NSCRUNCH-1)*out_time_idx*NCHAN;
+    ///////////////////////////////////////////////////////
 
     // TODO -- we might not want an additional cut on MIN_WEIGHT here
     int src_idx = i+(NSCRUNCH-1)*(i/NCHAN)*NCHAN;
