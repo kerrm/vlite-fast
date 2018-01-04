@@ -16,7 +16,8 @@ fi
 gdb -ex=r --args /home/vlite-master/mtk/src/process_baseband -p ${1} -k ${2} -K ${3} -w ${4} -b ${5} -o
 if [ ${3} -gt 0 ]
 then
-sleep 5
+wait $(pgrep heimdall)
+sleep 1
 sudo /home/vlite-master/mtk/bin/dada_db -k ${3} -d
 sudo /home/vlite-master/mtk/bin/dada_db -k $(( ${3} + 2 )) -d
 fi

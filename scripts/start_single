@@ -11,15 +11,17 @@
 # $9 = write_fb
 # $10 = nbit
 #set -x
-export LD_LIBRARY_PATH=/home/vlite-master/mtk/lib:/usr/cuda-6.5/lib64:${LD_LIBRARY_PATH}
+export LD_LIBRARY_PATH=/home/vlite-master/mtk/lib:/usr/cuda/lib64:${LD_LIBRARY_PATH}
 #sleep 0.5
+
 
 # arguments should be
 # $1 = interface
 # $2 = writer port
 # $3 = info port
 # $4 = baseband dada key
-sudo -b /home/vlite-master/mtk/scripts/start_writer ${2} ${5} ${6} ${7}
+#sudo -b /home/vlite-master/mtk/scripts/start_writer ${2} ${5} ${6} ${7}
+sudo -b LD_LIBRARY_PATH=/home/vlite-master/mtk/lib /home/vlite-master/mtk/scripts/start_writer ${2} ${5} ${6} ${7}
 sleep 0.5
 
 # $1 = reader port
@@ -28,4 +30,4 @@ sleep 0.5
 # $4 = write_fb
 # $5 = nbit
 #sudo LD_LIBRARY_PATH=${LD_LIBRARY_PATH} -b /home/vlite-master/mtk/scripts/start_process ${4} ${7} ${8} ${9} ${10}
-/home/vlite-master/mtk/scripts/start_process ${4} ${7} ${8} ${9} ${10} &
+/home/vlite-master/mtk/scripts/start_process ${4} ${7} ${8} ${9} ${10} ${3} &

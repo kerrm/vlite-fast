@@ -1,11 +1,12 @@
 #!/bin/bash
-#set -x
+set -x
 # arguments should be
 # $1 = reader port
 # $2 = baseband dada key 
 # $3 = filterbank dada key 
 # $4 = write_fb
 # $5 = nbit
+# $6 = gpu_id
 if [ ${3} -gt 0 ]
 then
 #/home/vlite-master/mtk/scripts/start_dada ${3} 2012800 8
@@ -13,10 +14,30 @@ then
 /home/vlite-master/mtk/scripts/start_dada ${3} 10485760 8
 /home/vlite-master/mtk/scripts/start_dada $(( ${3} + 2 )) 10485760 8
 fi
-/home/vlite-master/mtk/src/process_baseband -p ${1} -k ${2} -K ${3} -w ${4} -b ${5} -o
+
+# start nvidia-smi logging if not already
+if [ ! $(pgrep -x nvidia-smi) ]
+then
+  nvidia-smi -f /home/vlite-master/mtk/logs/nvidia-smi_log_$(hostname).asc -l 2 &
+  NVIDIA_SMI_PID=$!
+else
+  NVIDIA_SMI_PID=0
+fi
+echo "NVIDIA_SMI_PID=${NVIDIA_SMI_PID}"
+
+/home/vlite-master/mtk/src/process_baseband -p ${1} -k ${2} -K ${3} -w ${4} -b ${5} -g ${6} -o
 if [ ${3} -gt 0 ]
 then
-sleep 5
+  if [ pgrep -x heimdall > /dev/null ]
+  then
+    wait $(pgrep -x heimdall)
+  fi
+sleep 1
 sudo /home/vlite-master/mtk/bin/dada_db -k ${3} -d
 sudo /home/vlite-master/mtk/bin/dada_db -k $(( ${3} + 2 )) -d
+fi
+
+if [ $NVIDIA_SMI_PID -gt 0 ]
+then
+  kill $NVIDIA_SMI_PID
 fi

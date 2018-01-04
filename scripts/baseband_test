@@ -11,14 +11,13 @@ sudo killall heimdall
 sleep 0.1
 
 # start up psrdada buffer
-sudo /home/vlite-master/mtk/bin/dada_db -k 40 -d
-sudo /home/vlite-master/mtk/bin/dada_db -k 40 -l -b 257638400 -n 8
-#sudo /home/vlite-master/mtk/bin/dada_db -k 42 -d
-#sudo /home/vlite-master/mtk/bin/dada_db -k 42 -l -b 2012800 -n 8
+./start_dada 40 257638400 8
+./start_dada 42 2012800 8
+./start_dada 44 2012800 8
 sleep 0.1
 
 # run baseband generation in background
-/home/vlite-master/mtk/src/genbase -t 6 -n 10 -d 20 -a 0.05 -s 0.1 -p 0.5 -r 102 &
+/home/vlite-master/mtk/src/genbase -t 60 -n 2 -d 10 -a 0.05 -s 0.1 -p 0.5 -r 102 &
 sleep 0.1
 
 # run in debugger if needed
@@ -30,4 +29,5 @@ sleep 0.1
 
 sleep 0.5
 sudo /home/vlite-master/mtk/bin/dada_db -k 40 -d
-#sudo /home/vlite-master/mtk/bin/dada_db -k 42 -d
+sudo /home/vlite-master/mtk/bin/dada_db -k 42 -d
+sudo /home/vlite-master/mtk/bin/dada_db -k 44 -d
