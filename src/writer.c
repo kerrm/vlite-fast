@@ -110,6 +110,25 @@ void print_observation_document(char* result, ObservationDocument* od)
   strcat(result,s);
 }
 
+void fprint_observation_document(FILE* fd, ObservationDocument* od)
+{
+  fprintf(fd,"    datasetId = %s\n", od->datasetId);
+  fprintf(fd,"    configId = %s\n", od->configId);
+  fprintf(fd,"    startTime = %10.8f\n", od->startTime);
+  fprintf(fd,"    name = %s\n", od->name);
+  fprintf(fd,"    ra = %10.8f\n", od->ra);
+  fprintf(fd,"    dec = %10.8f\n", od->dec);
+  fprintf(fd,"    dra = %10.8f\n", od->dra);
+  fprintf(fd,"    ddec = %10.8f\n", od->ddec);
+  fprintf(fd,"    azoffs = %10.8f\n", od->azoffs);
+  fprintf(fd,"    eloffs = %10.8f\n", od->eloffs);
+  fprintf(fd,"    startLST = %10.8f\n", od->startLST);
+  fprintf(fd,"    scanNo = %d\n", od->scanNo);
+  fprintf(fd,"    subscanNo = %d\n", od->subscanNo);
+  fprintf(fd,"    primaryBand = %s\n", od->primaryBand);
+  fprintf(fd,"    usesPband = %d\n", od->usesPband);
+}
+
 typedef struct {
   
   char* buf;          // address to buffer to copy
@@ -192,6 +211,7 @@ int main(int argc, char** argv)
   char cmd = CMD_NONE;
   int arg, maxsock = 0; 
   int stderr_output = 0;
+
   
   while ((arg = getopt(argc, argv, "hk:p:i:e:o")) != -1) {
     switch(arg) {
@@ -335,6 +355,7 @@ int main(int argc, char** argv)
   ssize_t info_bytes_read = 0;
   ssize_t raw_bytes_read = 0;
   ssize_t ipcio_bytes_written = 0;
+  time_t dump_time = 0;
 
   while (1) {
 
@@ -373,6 +394,15 @@ int main(int argc, char** argv)
         multilog (log, LOG_INFO, "After dada_hdu_lock_write\n");
         fflush (logfile_fp);
         cmd = CMD_NONE;
+
+        // check for a set source to trigger on
+        int do_dump = dump_check_name (od.name);
+        // dump a maximum of 3 times on known sources
+        if (do_dump > 0 && do_dump < 3) {
+          dump_time = time (NULL);
+          multilog (log, LOG_INFO, "Setting a dump time %ld for %s.\n",
+              dump_time, od.name);
+        }
       }
       else if (cmd == CMD_EVENT) {
         multilog (log, LOG_INFO, "[STATE_STOPPED] ignored CMD_EVENT.\n");
@@ -408,9 +438,21 @@ int main(int argc, char** argv)
         cmd = wait_for_cmd (&c, logfile_fp);
       }
 
-      if (cmd == CMD_EVENT) {
-        
+      // check if we are enough packets removed from an automatic dump
+      // request and, if so, execute it; wait 10s
+      int do_dump = (dump_time && (packets_written > 25600*20));
+      if (do_dump)
+        dump_time = 0;
+      if (cmd == CMD_EVENT)
+      {
+        do_dump = 1;
         cmd = CMD_NONE;
+        // CMD_EVENT overrides dump_time
+        dump_time = 0;
+      }
+
+      if (do_dump) {
+        
         // dump voltages to file
         
         // check to see if there is a previous dump ongoing
@@ -454,10 +496,11 @@ int main(int argc, char** argv)
 
         // for testing, pretend trigger time is current time -14s
         // with a 20s transient
-        time_t trigger_time = time (NULL) - 28;
-        double trigger_len = 20;
+        time_t trigger_time = time (NULL)-1;
+        //double trigger_len = 20;
         time_t tmin = trigger_time - 8;
-        time_t tmax = trigger_time + trigger_len + 8;
+        //time_t tmax = trigger_time + trigger_len + 8;
+        time_t tmax = trigger_time;
         printf ("tmin = %ld tmax = %ld\n",tmin,tmax);
         char* bufs_to_write[32] = {NULL};
 
@@ -513,11 +556,21 @@ int main(int argc, char** argv)
               multilog (log, LOG_ERR, "pthread_detach failed\n");
         }
 
+        // write out the observation document for this dump
+        char dump_od_fname[256];
+        snprintf (dump_od_fname, 255,
+            "/home/vlite-master/mtk/events/%s.od", currt_string);
+        FILE *dump_od_fp = fopen (dump_od_fname, "w");
+        fprint_observation_document(dump_od_fp, &od);
+        fclose (dump_od_fp);
+
+        // TODO -- want to transfer antenna properties and write them out
+
         // and we're done
         multilog (log, LOG_INFO,
             "Launched %d threads for buffer dump.\n", nthreadios);
 
-      } // end CMD_EVENT logic
+      } // end do_dump logic
       
       //CMD_STOP --> change state to STOPPED, close data block
       else if (cmd == CMD_STOP) {
