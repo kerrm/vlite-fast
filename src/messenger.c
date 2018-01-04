@@ -82,6 +82,8 @@ int main(int argc, char** argv)
 
   uint64_t manual_control_port = 0;
   int stdout_output = 1;
+  int write_alerts = 0;
+  int write_obsinfos = 1;
 
   int arg = 0;
   while ((arg = getopt(argc, argv, "hom:")) != -1) {
@@ -326,20 +328,19 @@ int main(int argc, char** argv)
         if (D.type == SCANINFO_OBSERVATION) {
           od = &(D.data.observation);
     
-          sprintf (scaninfofile,"%s/%s.%s.obsinfo.%04d.%04d.txt",
-            OBSINFODIR,od->datasetId,od->name,od->scanNo,od->subscanNo);
+          if (write_obsinfos) {
+            sprintf (scaninfofile,"%s/%s.%s.obsinfo.%04d.%04d.txt",
+              OBSINFODIR,od->datasetId,od->name,od->scanNo,od->subscanNo);
 
-#if 0
-          if ((sfd = fopen(scaninfofile,"w")) == NULL) {
-            multilog (log, LOG_ERR, 
-              "Messenger: Could not open file %s for writing.\n",scaninfofile);
+            if ((sfd = fopen(scaninfofile,"w")) == NULL) {
+              multilog (log, LOG_ERR, 
+                "Messenger: Could not open file %s for writing.\n",scaninfofile);
+            }
+            else {
+              fprintScanInfoDocument (&D,sfd);
+              fclose (sfd);
+            }
           }
-          else {
-            // TEMP -- disable obsinfo output
-            fprintScanInfoDocument (&D,sfd);
-            fclose (sfd);
-          }
-#endif
         
           // TO ADD: Check that Writers are still connected before sending; change their isonnected elements if they are not
           if (strcasecmp (od->name,"FINISH") == 0)
@@ -435,8 +436,6 @@ int main(int argc, char** argv)
       printScanInfoDocument (&D);
       multilog (log, LOG_INFO,
           "Message type: %d = %s\n",D.type,ScanInfoTypeString[D.type]);
-      // TEMP -- disable output of antenna prop logs
-#if 0
       if (D.type == SCANINFO_ANTPROP) {
 
         const AntPropDocument* ap = &(D.data.antProp);
@@ -453,7 +452,6 @@ int main(int argc, char** argv)
           fclose (sfd);
         }
       }
-# endif
     } // end Antprop socket block
 
     //Alert socket
@@ -467,8 +465,7 @@ int main(int argc, char** argv)
 
       parseAlertDocument (&A, msg);
       //if((strcmp(A.monitorName,"ELPosError") == 0 || strcmp(A.monitorName,"AZPosError") == 0) && A.alertState == 1) {
-      if (strcmp (A.monitorName,"ELPosError") == 0 || strcmp (A.monitorName,"AZPosError") == 0) {
-      //if (1) {
+      if (write_alerts && (strcmp (A.monitorName,"ELPosError") == 0 || strcmp (A.monitorName,"AZPosError") == 0)) {
         //printAlertDocument(&A);
         //printf("alertState = %d\n", A.alertState);
         //sprintf(scaninfofile,"%f.alert.txt",A.timeStamp);
