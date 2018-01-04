@@ -108,8 +108,11 @@ int write_psrdada_header (dada_hdu_t* hdu, char* inchdr, vdif_header* vdhdr, int
   double freq0 = 384.;
   double freq = freq0 + 0.5*(CHANMIN+CHANMAX-1)*chbw;
 
-  dada_hdu_lock_write (hdu);
+  fprintf (stderr, "before lock\n");
+  dadacheck (dada_hdu_lock_write (hdu));
+  fprintf (stderr, "after lock\n");
   char* ascii_hdr = ipcbuf_get_next_write (hdu->header_block);
+  fprintf (stderr, "after next write\n");
   dadacheck (ascii_header_set (ascii_hdr, "STATIONID", "%d", station_id));
   dadacheck (ascii_header_set (ascii_hdr, "RA", "%lf", ra));
   dadacheck (ascii_header_set (ascii_hdr, "DEC", "%lf", dec));
@@ -133,6 +136,29 @@ int write_psrdada_header (dada_hdu_t* hdu, char* inchdr, vdif_header* vdhdr, int
     dadacheck (ascii_header_set (ascii_hdr, "SIGPROC_FILE", "%s", fb_file) );
   multilog (hdu->log, LOG_INFO, "%s",ascii_hdr);
   ipcbuf_mark_filled (hdu->header_block, 4096);
+  return 0;
+}
+
+int  clear_psrdada_buffer (dada_hdu_t* hdu)
+{
+  //fprintf (stderr, "locking read");
+  dadacheck (dada_hdu_lock_read (hdu));
+  uint64_t hdr_size = 0;
+  //fprintf (stderr, "clearing headers");
+  for (uint64_t i = 0; i < ipcbuf_get_nfull (hdu->header_block); ++i)
+  {
+    ipcbuf_get_next_read (hdu->header_block,&hdr_size);
+    dadacheck (ipcbuf_mark_cleared (hdu->header_block));
+  }
+  ipcbuf_t* db = (ipcbuf_t*)hdu->data_block;
+  //fprintf (stderr, "clearing datas");
+  for (uint64_t i = 0; i < ipcbuf_get_nfull (db); ++i)
+  {
+    ipcbuf_get_next_read (db,&hdr_size);
+    dadacheck (ipcbuf_mark_cleared (db));
+  }
+  //fprintf (stderr, "cleared data\n");
+  dadacheck (dada_hdu_unlock_read (hdu));
   return 0;
 }
 
@@ -394,6 +420,7 @@ int main (int argc, char *argv[])
   // connect to output buffer (optional)
   dada_hdu_t* hdu_out[NOUTBUFF] = {NULL};
   FILE* heimdall_fp[NOUTBUFF] = {NULL};
+  int buffer_ok[NOUTBUFF] = {0};
   int active_buffer = 0;
   if (key_out) {
     // connect to the output buffer(s)
@@ -406,6 +433,7 @@ int main (int argc, char *argv[])
             "Unable to connect to outgoing PSRDADA buffer #%d!\n",ibuff+1);
         exit (EXIT_FAILURE);
       }
+      buffer_ok[ibuff] = 1;
     }
   }
 
@@ -792,8 +820,44 @@ int main (int argc, char *argv[])
 
   // write out psrdada header; NB this locks the hdu for writing
   if (key_out)
-    write_psrdada_header (hdu_out[active_buffer], incoming_hdr, vdhdr,
-      npol, heimdall_file);
+  {
+    if (!buffer_ok[active_buffer])
+    {
+      // either heimdall crashed, or previous obs. was too short to invoke
+      // heimdall; in either case, reset the psrdada buffer; I think the
+      // easiest way to do this is simply to create a new dada_hdu for
+      // the shared memory
+      fprintf (stderr, "restoring buffer\n");
+      int status = clear_psrdada_buffer (hdu_out[active_buffer]);
+      /*
+      dada_hdu_destroy (hdu_out[active_buffer]);
+      hdu_out[active_buffer] = dada_hdu_create (log);
+      dada_hdu_set_key (hdu_out[active_buffer],key_out+active_buffer*2);
+      if (dada_hdu_connect (hdu_out[active_buffer]) != 0) {
+        multilog (log, LOG_ERR, 
+            "Unable to connect to outgoing PSRDADA buffer #%d!\n",
+              active_buffer+1);
+        exit (EXIT_FAILURE);
+      }
+      */
+      if (status==0)
+      {
+        buffer_ok[active_buffer] = 1;
+        fprintf (stderr, "restored buffer\n");
+      }
+      else
+      {
+        fprintf (stderr, "unable to restore buffer\n");
+        buffer_ok[active_buffer] = 0;
+      }
+    }
+    if (buffer_ok[active_buffer])
+    {
+      write_psrdada_header (hdu_out[active_buffer], incoming_hdr, vdhdr,
+        npol, heimdall_file);
+      fprintf (stderr, "write psrdada header\n");
+    }
+  }
 
   // write out a sigproc header
   int station_id = write_sigproc_header (fb_fp, incoming_hdr, vdhdr, npol);
@@ -903,11 +967,14 @@ int main (int argc, char *argv[])
     // keep log on disk up to date
     fflush (logfile_fp);
 
-    // if we have accumulated (exactly) 10s of data, then launch heimdall
+    // if we have accumulated at least 10s of data, then launch heimdall
     // (heimdall will hang on very short runs, not sure why, so make sure
     // we never launch it without a reasonable amount of data
-    if (key_out && (fabs(integrated-10)<0.01))
+    // TODO -- should we always clear the relevant buffer?
+    if ( !heimdall_launched && buffer_ok[active_buffer] && (integrated > 10))
     {
+      fprintf (stderr, "doing heimdall logic\n");
+      fflush (stderr);
       if (heimdall_fp[active_buffer])
       {
         // have used previous buffer, make sure processing is finished
@@ -923,6 +990,7 @@ int main (int argc, char *argv[])
         {
           multilog (log, LOG_ERR, "heimdall exit status nonzero\n");
           // TODO -- exit on such an error?
+          // or set active buffer to need reset
         }
         heimdall_fp[active_buffer] = NULL;
         multilog (log, LOG_INFO, "Successful pclose.\n");
@@ -1214,17 +1282,39 @@ int main (int argc, char *argv[])
       cudaEventRecord (start,0);
       #endif 
 
-      if (key_out)
+      //if (key_out)
+      if (buffer_ok[active_buffer])
       {
         char* outbuff = RFI_MODE==2? (char*)fft_trim_u_kur_hst:
                                      (char*)fft_trim_u_hst;
-        size_t written = ipcio_write (
-            hdu_out[active_buffer]->data_block,outbuff,maxn);
-        if (written != maxn)
+        // TODO -- we can occasionally check how many bytes are available
+        // in the ipcbuf / free buffers there are, when when we've written
+        // that many bytes, check again.  This will provide an unintense
+        // way to make sure we don't block.  If we see the buffer is going
+        // to be full, abort this observation and... clear the buffer? Not
+        // sure how to do that.
+
+        // initial check for buffers in trouble -- see if we get down to
+        // working on the final buffer
+        ipcio_t* ipc = hdu_out[active_buffer]->data_block;
+        uint64_t m_nbufs = ipcbuf_get_nbufs ((ipcbuf_t *)ipc);
+        uint64_t m_full_bufs = ipcbuf_get_nfull((ipcbuf_t*) ipc);
+        if (m_full_bufs == (m_nbufs - 1))
         {
-          multilog (log, LOG_ERR, "Tried to write %lu bytes to output psrdada buffer but only wrote %lu.", maxn, written);
-          fprintf (stderr, "Tried to write %lu bytes to output psrdada buffer but only wrote %lu.", maxn, written);
-          exit (EXIT_FAILURE);
+          buffer_ok[active_buffer] = 0;
+          dadacheck (dada_hdu_unlock_write (hdu_out[active_buffer]));
+          multilog (log, LOG_ERR, "Only one free buffer left!  Aborting output to heimdall and clearing buffer.\n");
+        }
+        else
+        {
+          size_t written = ipcio_write (
+              hdu_out[active_buffer]->data_block,outbuff,maxn);
+          if (written != maxn)
+          {
+            multilog (log, LOG_ERR, "Tried to write %lu bytes to output psrdada buffer but only wrote %lu.", maxn, written);
+            fprintf (stderr, "Tried to write %lu bytes to output psrdada buffer but only wrote %lu.", maxn, written);
+            exit (EXIT_FAILURE);
+          }
         }
       }
 
@@ -1263,27 +1353,18 @@ int main (int argc, char *argv[])
 
   if (key_out)
   {
-    dadacheck (dada_hdu_unlock_write (hdu_out[active_buffer]));
-    if (heimdall_launched)
+    // if buffer is in good condition
+    if (buffer_ok[active_buffer])
     {
-      // switch to next output buffer
+      dadacheck (dada_hdu_unlock_write (hdu_out[active_buffer]));
+      // if we did not launch heimdall, flag the buffer as bad so it will
+      // be cleared before re-used
+      if (!heimdall_launched)
+        buffer_ok[active_buffer] = 0;
+      // otherwise, switch to the next buffer and allow heimdall to
+      // continue to process this one
       if (NOUTBUFF == ++active_buffer)
         active_buffer = 0;
-    }
-    else
-    {
-      // did not launch heimdall, need to clear output buffer
-      multilog (log, LOG_INFO, "Clearing output psrdada buffer.\n");
-      dadacheck (dada_hdu_lock_read (hdu_out[active_buffer]));
-      ipcbuf_get_next_read (
-          hdu_out[active_buffer]->header_block,&hdr_size);
-      dadacheck (ipcbuf_mark_cleared (
-          hdu_out[active_buffer]->header_block));
-      ipcbuf_get_next_read (
-          (ipcbuf_t*)hdu_out[active_buffer]->data_block,&hdr_size);
-      dadacheck (ipcbuf_mark_cleared ( (ipcbuf_t*)
-          hdu_out[active_buffer]->data_block));
-      dadacheck (dada_hdu_unlock_read (hdu_out[active_buffer]));
     }
   }
 
