@@ -35,6 +35,7 @@ VFASTConfig** parse_vfast_config (char* config_file, int* nconfig);
 struct timespec get_ms_ts (int ms);
 char* print_vfast_config (VFASTConfig* vc, FILE* fp);
 time_t vdif_to_unixepoch (vdif_header*);
+int dump_check_name (char*);
 
 #ifdef _cplusplus
 }

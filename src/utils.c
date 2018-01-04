@@ -448,3 +448,28 @@ time_t vdif_to_unixepoch (vdif_header* vdhdr)
   time_t local_offset = mktime(&unix_epoch);
   return epoch_seconds-local_offset;
 }
+
+int dump_check_name (char* src)
+{
+  static int cnt_3C147 = 0;
+  static int cnt_3C48 = 0;
+  //static int cnt_3C273 = 0;
+  static int cnt_B0329 = 0;
+  static int cnt_B0833 = 0;
+  if (strstr (src, "3C147") != NULL) {
+    return ++cnt_3C147;
+  }
+  if (strstr (src, "3C48") != NULL) {
+    return ++cnt_3C48;
+  }
+  //if (strstr (src, "3C273") != NULL) {
+  //  return ++cnt_3C273;
+  //}
+  if (strstr (src, "B0329+54") != NULL) {
+    return ++cnt_B0329;
+  }
+  if (strstr (src, "B0833-45") != NULL) {
+    return ++cnt_B0833;
+  }
+  return 0;
+}
