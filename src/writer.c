@@ -3,10 +3,8 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#include <fcntl.h>
 #include <errno.h>
 #include <pthread.h>
-#include <sys/stat.h>
 
 #include "dada_def.h"
 #include "dada_hdu.h"
@@ -129,63 +127,8 @@ void fprint_observation_document(FILE* fd, ObservationDocument* od)
   fprintf(fd,"    usesPband = %d\n", od->usesPband);
 }
 
-typedef struct {
-  
-  char* buf;          // address to buffer to copy
-  uint64_t bufsz;     // size of buffer in bytes
-  char fname[256];    // name of output file
-  int status;         // status: -1 == working, 0 == success, >0 == error
-  pthread_t tid;      // the thread context
-
-} threadio_t;
-
 static threadio_t** threadios = NULL;
 static int nthreadios = 0;
-
-void* buffer_dump (void* mem)
-{
-  threadio_t* tio = (threadio_t*) mem;
-  tio->status = -1;
-  
-  // malloc enough memory for local copy
-  char* mybuff = malloc (tio->bufsz);
-  if (NULL==mybuff)
-  {
-    tio->status = 1; // 1 encodes failed memory copy
-    return NULL;
-  }
-
-  memcpy (mybuff, tio->buf, tio->bufsz);
-
-  // dump to disk
-  int fd = open (tio->fname, O_WRONLY | O_CREAT, 0664);
-  uint64_t written = 0;
-  while (written < tio->bufsz)
-  {
-    ssize_t result = write (fd, mybuff+written, tio->bufsz-written);
-    if (result < 0)
-    {
-      if (EINTR != errno)
-      {
-        tio->status = 2;
-        free (mybuff);
-        return NULL;
-      }
-      // TODO -- need to sleep if interrupted?
-    }
-    else
-      written += result;
-  }
-  fsync (fd);
-  // needed since we don't reset umask, which is 0027
-  fchmod (fd, 0664);
-  close (fd);
-  free (mybuff);
-  // hardcode for now vliteops=6362, vlite=5636
-  chown (tio->fname, 6362, 5636);
-  tio->status = 0;
-  return NULL;
-}
 
 int main(int argc, char** argv)
 {
@@ -278,7 +221,6 @@ int main(int argc, char** argv)
   // observation metadata
   ObservationDocument od;
 
-
   // logging
   time_t currt;
   struct tm tmpt;
@@ -298,6 +240,18 @@ int main(int argc, char** argv)
     multilog_add (log, stderr);
   printf("writing log to %s\n",logfile);
 
+  // keep track of last N (~200) dump times.  The idea is both to avoid
+  // dumping out the same data twice, and to potentially place a limit on
+  // the number of dumps per unit time.  In current implementation, each
+  // buffer is 1s, so keeping track of UTC time stamps is perfect.
+  size_t size_dump_times=300, num_dump_times=0 ,idx_dump_times=0;
+  time_t dump_times[size_dump_times];
+  memset (dump_times, 0, sizeof(time_t)*size_dump_times);
+
+  // set up some limits on dumps; a reasonable guess might be no more than
+  // 30s of dumped data every five minutes
+  size_t dump_window = 120;
+  size_t max_dump_window = 60;
 
   dada_hdu_set_key (hdu,key);
 
@@ -351,7 +305,10 @@ int main(int argc, char** argv)
   // with the kluge.
   int skip_frames = 0;
   int write_header = 0;
+  int write_voltages = 0;
   uint64_t packets_written = 0;
+  uint64_t voltage_packets_written = 0;
+  uint64_t voltage_packet_counter = 0;
   ssize_t info_bytes_read = 0;
   ssize_t raw_bytes_read = 0;
   ssize_t ipcio_bytes_written = 0;
@@ -368,6 +325,9 @@ int main(int argc, char** argv)
         state = STATE_STARTED;
         skip_frames = 0;
         packets_written = 0;
+        write_voltages = 0;
+        voltage_packets_written = 0;
+        voltage_packet_counter = 0;
         // TODO -- block here until we get the observation info
         // TODO -- need to handle case of multiple observation documents
         info_bytes_read = read (ci.rqst,ci.buf,1024);
@@ -394,15 +354,24 @@ int main(int argc, char** argv)
         multilog (log, LOG_INFO, "After dada_hdu_lock_write\n");
         fflush (logfile_fp);
         cmd = CMD_NONE;
+        //
+        // check for a set source to write voltages on
+        write_voltages = voltage_check_name(od.name,od.datasetId);
+        if (write_voltages)
+        {
+          dump_time = 0;
+          multilog (log, LOG_INFO, "Recording voltages for %s.\n",od.name);
+        }
 
-        // check for a set source to trigger on
-        int do_dump = dump_check_name (od.name);
+        // otherwise, check for a set source to trigger on
+        int do_dump = (write_voltages==0) & dump_check_name (od.name,od.datasetId);
         // dump a maximum of 3 times on known sources
         if (do_dump > 0 && do_dump < 3) {
           dump_time = time (NULL);
           multilog (log, LOG_INFO, "Setting a dump time %ld for %s.\n",
               dump_time, od.name);
         }
+
       }
       else if (cmd == CMD_EVENT) {
         multilog (log, LOG_INFO, "[STATE_STOPPED] ignored CMD_EVENT.\n");
@@ -438,20 +407,36 @@ int main(int argc, char** argv)
         cmd = wait_for_cmd (&c, logfile_fp);
       }
 
+      // note to future self -- dump_time is not actually used below, I think
+      // it's mostly just a shorthand for a triggered dump, so refactor to
+      // make it more apparent!
+
       // check if we are enough packets removed from an automatic dump
       // request and, if so, execute it; wait 10s
       int do_dump = (dump_time && (packets_written > 25600*20));
       if (do_dump)
         dump_time = 0;
-      if (cmd == CMD_EVENT)
+
+      // only trigger a "write voltage" dump every 10 seconds for overhead
+      if (write_voltages && (packets_written > 25600*16) && ((packets_written-voltage_packet_counter)>(25600*4)))
       {
         do_dump = 1;
+        voltage_packet_counter = packets_written;
+        multilog (log, LOG_INFO, "Issuing a new 10-s dump for %s.\n",od.name);
+      }
+
+
+      if (cmd == CMD_EVENT)
+      {
+        do_dump += 1; // will be 1 for CMD_EVENT or 2 for triggered dump
         cmd = CMD_NONE;
         // CMD_EVENT overrides dump_time
         dump_time = 0;
       }
 
-      if (do_dump) {
+      if (do_dump)
+      //if (0) // TMP -- disable dumps
+      {
         
         // dump voltages to file
         
@@ -485,8 +470,11 @@ int main(int argc, char** argv)
 
         // free previous structs
         for (int iio=0; iio < nthreadios; ++iio)
-          free (threadios[iio]);
-        free (threadios);
+          if (threadios[iio])
+            free (threadios[iio]);
+        if (threadios)
+          free (threadios); threadios = NULL;
+        nthreadios = 0;
 
         // determine which buffers to write
         ipcbuf_t* buf = (ipcbuf_t *) hdu->data_block;; 
@@ -498,19 +486,39 @@ int main(int argc, char** argv)
         // with a 20s transient
         time_t trigger_time = time (NULL)-1;
         //double trigger_len = 20;
-        time_t tmin = trigger_time - 8;
+        time_t tmin = trigger_time - 1;
         //time_t tmax = trigger_time + trigger_len + 8;
         time_t tmax = trigger_time;
         printf ("tmin = %ld tmax = %ld\n",tmin,tmax);
         char* bufs_to_write[32] = {NULL};
 
-        nthreadios = 0;
+        // check to see whether we have exceeded the dump limit; if we have
+        // a triggered dump, ignore the limit
+        if (do_dump==1)
+        {
+          int dumps_in_window = 0;
+          for (int idump=0; idump < num_dump_times; ++idump)
+          {
+            dumps_in_window += abs (trigger_time-dump_times[idump]) < dump_window;
+          } 
+          multilog (log, LOG_INFO, "Found %d seconds of dumps in the window.\n",
+              dumps_in_window);
+          if (dumps_in_window > max_dump_window)
+          {
+            multilog (log, LOG_INFO, "Too many dumps, skipping this trigger.\n");
+            continue;
+          }
+        }
+
         for (int ibuf=0; ibuf < nbufs; ++ibuf)
         {
           // get time for frame at start of buffer
           vdif_header* vdhdr = (vdif_header*) buffer[ibuf];
           time_t utc_seconds = vdif_to_unixepoch (vdhdr);
+
           // TMP
+          //
+          /*
           char dada_utc[32];
           struct tm utc_time;
           gmtime_r (&utc_seconds, &utc_time);
@@ -520,14 +528,36 @@ int main(int argc, char** argv)
           multilog (log, LOG_INFO, "buffer UTC %s\n", dada_utc);
           printf ("utc_seconds = %ld\n",utc_seconds);
           fprintVDIFHeader (stderr, vdhdr, VDIFHeaderPrintLevelShort);
+          */
+          //
           // end TMP
-          if ((utc_seconds >= tmin) && (utc_seconds <= tmax))
+
+          // first condition -- within trigger time (TODO -- if we want
+          // a voltage recording mode, could override this)
+          int cond1 = (utc_seconds >= tmin) && (utc_seconds <= tmax);
+
+          // second condition -- see if we have already dumped it
+          int cond2 = 1;
+          for (int idump=0; idump < num_dump_times; ++idump)
+          {
+            if (utc_seconds == dump_times[idump])
+            {
+              cond2 = 0;
+              break;
+            }
+          }
+          if (cond1 && cond2)
           {
             // dump this buffer
             bufs_to_write[nthreadios++] = buffer[ibuf];
             multilog (log, LOG_INFO, "dumping buffer %02d\n", ibuf);
+            num_dump_times += num_dump_times < size_dump_times;
+            if (idx_dump_times == size_dump_times)
+              idx_dump_times = 0;
+            dump_times[idx_dump_times++] = utc_seconds;
+            voltage_packets_written += 2*25600;
           }  
-        }
+        } // end loop over buffers
 
         // TODO -- replace this file name with appropriate format
         currt = time (NULL);
@@ -585,6 +615,7 @@ int main(int argc, char** argv)
         multilog (log, LOG_INFO, 
             "[STATE_STARTED->STOP] Wrote %d packets to psrdada buffer.\n",packets_written);
         packets_written = 0;
+        write_voltages = 0;
         cmd = CMD_NONE;
         fflush (logfile_fp);
         continue;

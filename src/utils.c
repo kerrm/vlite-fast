@@ -7,6 +7,8 @@
 #include <netdb.h>      /* for gethostbyname() */
 #include <sys/errno.h>   /* defines ERESTART, EINTR */
 //#include <sys/wait.h>    /* defines WNOHANG, for wait() */
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <linux/if_packet.h>
 #include <linux/if.h>
@@ -449,13 +451,14 @@ time_t vdif_to_unixepoch (vdif_header* vdhdr)
   return epoch_seconds-local_offset;
 }
 
-int dump_check_name (char* src)
+int dump_check_name (char* src, char* did)
 {
   static int cnt_3C147 = 0;
   static int cnt_3C48 = 0;
   //static int cnt_3C273 = 0;
   static int cnt_B0329 = 0;
   static int cnt_B0833 = 0;
+  static int cnt_frb = 0;
   if (strstr (src, "3C147") != NULL) {
     return ++cnt_3C147;
   }
@@ -468,8 +471,71 @@ int dump_check_name (char* src)
   if (strstr (src, "B0329+54") != NULL) {
     return ++cnt_B0329;
   }
+  if (strstr (src, "J0322+54") != NULL) {
+    return ++cnt_B0329;
+  }
   if (strstr (src, "B0833-45") != NULL) {
     return ++cnt_B0833;
   }
+  if (strstr (did, "18A-462") != NULL) {
+    cnt_frb += 1;
+    if (cnt_frb < 101)
+      return 1;
+  }
   return 0;
 }
+
+int voltage_check_name (char* src, char* did)
+{
+  return (strstr (src, "B0329+54") != NULL ||
+          strstr (src, "J0332+54") != NULL || 
+          strstr (src, "3C147") != NULL || 
+          strstr (src, "3C48") != NULL
+         );
+}
+
+void* buffer_dump (void* mem)
+{
+  threadio_t* tio = (threadio_t*) mem;
+  tio->status = -1;
+  
+  // malloc enough memory for local copy
+  char* mybuff = malloc (tio->bufsz);
+  if (NULL==mybuff)
+  {
+    tio->status = 1; // 1 encodes failed memory copy
+    return NULL;
+  }
+
+  memcpy (mybuff, tio->buf, tio->bufsz);
+
+  // dump to disk
+  int fd = open (tio->fname, O_WRONLY | O_CREAT, 0664);
+  uint64_t written = 0;
+  while (written < tio->bufsz)
+  {
+    ssize_t result = write (fd, mybuff+written, tio->bufsz-written);
+    if (result < 0)
+    {
+      if (EINTR != errno)
+      {
+        tio->status = 2;
+        free (mybuff);
+        return NULL;
+      }
+      // TODO -- need to sleep if interrupted?
+    }
+    else
+      written += result;
+  }
+  fsync (fd);
+  // needed since we don't reset umask, which is 0027
+  fchmod (fd, 0664);
+  close (fd);
+  free (mybuff);
+  // hardcode for now vliteops=6362, vlite=5636
+  chown (tio->fname, 6362, 5636);
+  tio->status = 0;
+  return NULL;
+}
+

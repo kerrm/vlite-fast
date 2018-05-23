@@ -24,6 +24,16 @@ typedef struct
   int nbit;
 } VFASTConfig;
 
+typedef struct {
+  
+  char* buf;          // address to buffer to copy
+  uint64_t bufsz;     // size of buffer in bytes
+  char fname[256];    // name of output file
+  int status;         // status: -1 == working, 0 == success, >0 == error
+  pthread_t tid;      // the thread context
+
+} threadio_t;
+
 int serve(int port, Connection* c);
 int wait_for_cmd(Connection* c, FILE* fp);
 void event_to_file(const ipcio_t* db, FILE* evfd);
@@ -35,7 +45,9 @@ VFASTConfig** parse_vfast_config (char* config_file, int* nconfig);
 struct timespec get_ms_ts (int ms);
 char* print_vfast_config (VFASTConfig* vc, FILE* fp);
 time_t vdif_to_unixepoch (vdif_header*);
-int dump_check_name (char*);
+int dump_check_name (char*,char*);
+int voltage_check_name (char*,char*);
+void* buffer_dump (void* mem);
 
 #ifdef _cplusplus
 }

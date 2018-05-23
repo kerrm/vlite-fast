@@ -88,6 +88,7 @@ void send_coords(double raj, double dej, double az, double za, _IO_FILE *output)
 int check_name (char* src)
 {
   return (strstr (src, "B0329+54") != NULL ||
+          strstr (src, "J0332+54") != NULL || 
           strstr (src, "B0531+21") != NULL || 
           strstr (src, "B0833-45") != NULL ||
           strstr (src, "B0950+08") != NULL || 
@@ -96,6 +97,8 @@ int check_name (char* src)
           strstr (src, "B1642-03") != NULL ||
           strstr (src, "B1749-28") != NULL || 
           strstr (src, "B1929+10") != NULL || 
+          strstr (src, "3C147") != NULL || 
+          strstr (src, "3C48") != NULL || 
           strstr (src, "J0341+5711") != NULL ||
           strstr (src, "J1713+0747") != NULL ||
           strstr (src, "J1909-3744") != NULL);

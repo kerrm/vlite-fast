@@ -67,6 +67,10 @@ if __name__ == '__main__':
         lines = filter(lambda l: len(l) > 0,
             map(str.strip,''.join(payload).split('\n')))
         print lines[0]
+        # add this temporarily, to allow reconstruction of candidates
+        # that are received
+        for line in lines[1:]:
+            print line
         for line in lines[1:]:
             print Candidate(None,line)
 

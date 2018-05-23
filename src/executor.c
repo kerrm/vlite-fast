@@ -501,6 +501,10 @@ void printScanInfoDocument(const ScanInfoDocument *D)
 				printVLAAntenna(&ap->antenna[a], a, 4);
 			}
 		}
+		for(a = 0; a < STATE_N_EOP; ++a)
+		{
+      printEOP(&ap->eop[a], 4);
+		}
 		break;
 
 	case SCANINFO_SUBARRAY:
@@ -573,6 +577,10 @@ void fprintScanInfoDocument(const ScanInfoDocument *D, FILE *fd)
 			{
 			  fprintVLAAntenna(fd,&ap->antenna[a], a, 4);
 			}
+		}
+		for(a = 0; a < STATE_N_EOP; ++a)
+		{
+      printEOP(&ap->eop[a], 4);
 		}
 		break;
 

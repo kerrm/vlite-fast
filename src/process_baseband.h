@@ -39,6 +39,7 @@ cudaEventElapsedTime (Z,X,Y);}
 // these are more skew because they integrate over longer time, only
 // excise the really bad ones
 #define DAG_FB_THRESH 5.0
+#define DAG_INF DAG_THRESH + DAG_FB_THRESH + 1
 //#define DEBUG_WEIGHTS 1
 # // exclude samples with more than 80% RFI
 #define MIN_WEIGHT 0.2

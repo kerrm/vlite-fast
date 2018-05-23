@@ -481,8 +481,9 @@ int main (int argc, char *argv[])
     cudacheck ( cudaMalloc (
       (void**)&fft_out_kur, sizeof(cufftComplex)*fft_per_chunk*NCHAN) );
 
-  // device memory for kurtosis statistics, uses NKURTO samples
-  // NKURTO must be commensurate with samps_per_chunk/2
+  // device memory for kurtosis statistics, uses NKURTO samples, both pols
+  // NKURTO must be commensurate with samps_per_chunk/2, i.e. samples per
+  // chunk in a pol
   size_t nkurto_per_chunk = samps_per_chunk / NKURTO;
 
   // extra factor of 2 to store both power and kurtosis statistics
@@ -493,6 +494,8 @@ int main (int argc, char *argv[])
   cudaMalloc ((void**)&kur_fb_dev,2*sizeof(cufftReal)*fft_per_chunk) );
 
   // store D'Agostino statistic for thresholding
+  // only using one per pol now, but keep memory size for both pols
+  // to make life easier; the values are duplicated
   cufftReal* dag_dev=NULL; if (RFI_MODE) cudacheck (
   cudaMalloc ((void**)&dag_dev,sizeof(cufftReal)*nkurto_per_chunk) );
   cufftReal* dag_fb_dev=NULL; if (RFI_MODE) cudacheck (
@@ -1001,7 +1004,8 @@ int main (int argc, char *argv[])
       }
       char heimdall_cmd[256];
       // NB need to redirect stderr or else we can't catch it
-      snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 45000 -gpu_id %d -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -beam %d -k %x -coincidencer vlite-nrl:27555", gpu_id, station_id, key_out + active_buffer*2); 
+      // TODO -- consider adding zap chans to bottom of band?
+      snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 45000 -gpu_id %d -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -zap_chans 3900 4096 -beam %d -k %x -coincidencer vlite-nrl:27555", gpu_id, station_id, key_out + active_buffer*2); 
       //snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 45000 -gpu_id 0 -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -beam %d -k %x", station_id, key_out + active_buffer*2); 
       multilog (log, LOG_INFO, "%s\n", heimdall_cmd);
       heimdall_fp[active_buffer] = popen (heimdall_cmd, "r");
@@ -1090,22 +1094,27 @@ int main (int argc, char *argv[])
         cudacheck (cudaGetLastError () );
 
         // compute the thresholding statistic
+        // NB now modified to combine polarizations;;;;
         compute_dagostino <<<nsms*32,NTHREAD>>> (
-            kur_dev+nkurto_per_chunk,dag_dev,nkurto_per_chunk);
+            kur_dev+nkurto_per_chunk,dag_dev,nkurto_per_chunk/2);
         cudacheck (cudaGetLastError () );
 
         // calculate coarser kurtosis (for entire filterbank sample, e.g. 12500 samples)
+        // NB this relies on results of previous D'Agostino calculation
         block_kurtosis <<<fft_per_chunk/8,256>>> (
             kur_dev,kur_dev+nkurto_per_chunk,dag_dev,
             kur_fb_dev,kur_fb_dev+fft_per_chunk);
         cudacheck (cudaGetLastError () );
+        // NB now modified to combine polarizations
         compute_dagostino2 <<<nsms*32,NTHREAD>>> (
-            kur_fb_dev+fft_per_chunk,dag_fb_dev,fft_per_chunk);
+            kur_fb_dev+fft_per_chunk,dag_fb_dev,fft_per_chunk/2);
         cudacheck (cudaGetLastError () );
 
         cudacheck (cudaMemset (
             kur_weights_dev,0,sizeof(cufftReal)*fft_per_chunk) );
-        // NB that fft_in_kur==fft_in if not writing both streams
+        // (1) NB that fft_in_kur==fft_in if not writing both streams
+        // (2) original implementation had a block for each pol; keeping
+        //     that, but two blocks now access the same Dagostino entry
         apply_kurtosis <<<nkurto_per_chunk, 256>>> (
             fft_in,fft_in_kur,dag_dev,dag_fb_dev,kur_weights_dev);
         cudacheck (cudaGetLastError () );
@@ -1645,40 +1654,30 @@ __global__ void compute_dagostino (cufftReal* kur, cufftReal* dag, size_t n)
       i < n; 
       i += blockDim.x*gridDim.x)
   {
+    // I'm not sure why I have a zero check here; the only time it should
+    // happen is if all of the samples are also 0.
+    float dag1 = DAG_INF, dag2 = DAG_INF;
     if (kur[i] != 0.)
     {
       float t = (1-2./A)/(1.+(kur[i]-3.-mu1)*Z2_3);
-      dag[i] = Z2_1*(Z2_2 - powf (t,1./3));
+      if (t > 0)
+        dag1 = fabsf (Z2_1*(Z2_2 - powf (t,1./3)));
     }
-    else
-      dag[i] = 0.;
-  }
-}
-
-// TODO -- this isn't quite right, because there won't necessarily be
-// NFFT samples in the weighted version; since we're computing many fewer,
-// don't need to precompute.  However, empirically it doesn't seem to make
-// much of a difference..
-__global__ void compute_dagostino2 (cufftReal* kur, cufftReal* dag, size_t n)
-{
-  for (
-      int i = threadIdx.x + blockIdx.x*blockDim.x; 
-      i < n; 
-      i += blockDim.x*gridDim.x)
-  {
-    if (kur[i] != 0.)
+    if (kur[i+n] != 0.)
     {
-      float t = (1-2./Ab)/(1.+(kur[i]-3.-mu1b)*Z2b_3);
-      dag[i] = Z2b_1*(Z2b_2 - powf (t,1./3));
+      float t = (1-2./A)/(1.+(kur[i+n]-3.-mu1)*Z2_3);
+      if (t > 0)
+        dag2 = fabsf (Z2_1*(Z2_2 - powf (t,1./3)));
     }
-    else
-      dag[i] = DAG_FB_THRESH + 1;
+    // duplicate values to make bookkeeping in block_kurtosis easier
+    dag[i] = dag[i+n] = fmaxf (dag1, dag2);
   }
 }
 
 // compute a filter-bank level statistic
-// TODO -- can use the weighted sum here rather than the atomicAdds in
-// apply kurtosis
+// *** Importantly, this applies a fine-time filtering during calculation
+// *** of statistic, by zero-weighting any NKURTO-sized blocks of samples
+// *** that evade threshold.
 __global__ void block_kurtosis (cufftReal* pow, cufftReal* kur, cufftReal* dag, cufftReal* pow_block, cufftReal* kur_block)
 {
   volatile __shared__ float data2[256];
@@ -1699,14 +1698,19 @@ __global__ void block_kurtosis (cufftReal* pow, cufftReal* kur, cufftReal* dag, 
   {
     // each thread block does 8 filterbank blocks (one for each warp)
     int idx = (blockIdx.x*8 + warp_id)*(NFFT/NKURTO) + warp_tid;
-    wt[tid] = (dag[idx]<DAG_THRESH) && (dag[idx]>-DAG_THRESH);
+    //wt[tid] = (dag[idx]<DAG_THRESH) && (dag[idx]>-DAG_THRESH);
+    // updated now that dag array is already absolute valued
+    wt[tid] = dag[idx]<DAG_THRESH;
     data2[tid] = wt[tid]*pow[idx];
     data4[tid] = wt[tid]*kur[idx]*pow[idx]*pow[idx];
     if (NKURTO==250)
     {
+      // if using finer time bins, add in the contribution from
+      // the other pieces (see comment above)
       __syncthreads ();
       idx += 25;
-      float w = (dag[idx]<DAG_THRESH) && (dag[idx]>-DAG_THRESH);
+      //float w = (dag[idx]<DAG_THRESH) && (dag[idx]>-DAG_THRESH);
+      float w = dag[idx]<DAG_THRESH;
       data2[tid] += w*pow[idx];
       data4[tid] += w*kur[idx]*pow[idx]*pow[idx];
       wt[tid] += w;
@@ -1748,27 +1752,64 @@ __global__ void block_kurtosis (cufftReal* pow, cufftReal* kur, cufftReal* dag, 
   }
 }
 
-__global__ void apply_kurtosis (cufftReal *in, cufftReal *out, cufftReal *dag, cufftReal *dag_fb, cufftReal* norms)
+
+// TODO -- this isn't quite right, because there won't necessarily be
+// NFFT samples in the weighted version; since we're computing many fewer,
+// don't need to precompute.  However, empirically it doesn't seem to make
+// much of a difference..
+__global__ void compute_dagostino2 (cufftReal* kur, cufftReal* dag, size_t n)
+{
+  for (
+      int i = threadIdx.x + blockIdx.x*blockDim.x; 
+      i < n; 
+      i += blockDim.x*gridDim.x)
+  {
+    float dag1 = DAG_INF, dag2 = DAG_INF;
+    if (kur[i] != 0.)
+    {
+      float t = (1-2./Ab)/(1.+(kur[i]-3.-mu1b)*Z2b_3);
+      if (t > 0)
+        dag1 = fabsf (Z2b_1*(Z2b_2 - powf (t,1./3)));
+    }
+    if (kur[i+n] != 0.)
+    {
+      float t = (1-2./Ab)/(1.+(kur[i+n]-3.-mu1b)*Z2b_3);
+      if (t > 0)
+        dag2 = fabsf (Z2b_1*(Z2b_2 - powf (t,1./3)));
+    }
+    dag[i] = dag[i+n] = fmaxf (dag1, dag2);
+  }
+}
+
+__global__ void apply_kurtosis (
+    cufftReal *in, cufftReal *out, 
+    cufftReal *dag, cufftReal *dag_fb,
+    cufftReal* norms)
 {
 
   unsigned int tid = threadIdx.x;
 
-  // D'Agostino kurtosis TS
-  float d = dag[blockIdx.x];
-  float d_fb = dag_fb[blockIdx.x/(NFFT/NKURTO)];
+  // D'Agostino kurtosis TS; already absolute valued and gathered
+  // over the two polarizations, but is duplicated, so just use the
+  // entry in the second polarization; will also make it easier if
+  // we revert to independent polarizations
+  bool bad =  (dag[blockIdx.x] > DAG_THRESH) || (dag_fb[blockIdx.x/(NFFT/NKURTO)] > DAG_FB_THRESH);
+
   #ifdef DEBUG_WEIGHTS
   // if debugging, set the weights to 0 for the second half of all samples in
   // the chunk for 2nd pol and for the final eighth for the 1st pol
   int time_idx = blockIdx.x * NKURTO;
   bool c1 = time_idx > 3*(VLITE_RATE/(SEG_PER_SEC*2));
   bool c2 = (time_idx < VLITE_RATE/SEG_PER_SEC) && (time_idx > (7*VLITE_RATE/SEG_PER_SEC)/8);
-  d = d_fb = c1||c2?DAG_THRESH + 1:0;
+  bad = c1 || c2;
   #endif
-  if ((d > DAG_THRESH) || (d < -DAG_THRESH) || (d_fb > DAG_FB_THRESH) || (d < -DAG_FB_THRESH)) {
-  //if ((d > DAG_THRESH) || (d < -DAG_THRESH)) {
+
+  if (bad)
+  {
     // zero voltages
-    size_t offset = blockIdx.x*NKURTO;
-    if (tid < 250) {
+    if (tid < 250)
+    {
+      size_t offset = blockIdx.x*NKURTO;
       out[offset + tid] =  0;
       if (NKURTO==500)
         out[offset + tid + 250] =  0;
@@ -1777,7 +1818,8 @@ __global__ void apply_kurtosis (cufftReal *in, cufftReal *out, cufftReal *dag, c
   else
   {
     // if copying data, copy it
-    if (in != out && tid < 250) {
+    if (in != out && tid < 250)
+    {
       size_t offset = blockIdx.x*NKURTO;
       out[offset + tid] = in[offset + tid];
       if (NKURTO==500)
@@ -1786,7 +1828,9 @@ __global__ void apply_kurtosis (cufftReal *in, cufftReal *out, cufftReal *dag, c
 
     // add one to the filterbank block samples for weights
     if (tid==0)
+    {
       atomicAdd (norms + (blockIdx.x*NKURTO)/NFFT, float(NKURTO)/NFFT);
+    }
   }
 }
 
@@ -1902,6 +1946,11 @@ __global__ void detect_and_normalize3 (cufftComplex *fft_out, cufftReal* kur_wei
       // more often than every 1.5 s, so we can clip values above this
       // without substantial distortion and possibly prevent bandpass
       // saturation; when we do, don't update the bandpass
+
+      // TODO
+      // NB this leads to a problem if we do allow in some RFI and the
+      // bandpass gets stuck at a very small value.  Symptom is that the
+      // output re-quantized bits are all maxval.
 
       if (pow > bp_l*11)
         fft_out[j].x = 10;

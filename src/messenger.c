@@ -159,6 +159,7 @@ int main(int argc, char** argv)
   ScanInfoDocument D; //multicast message struct
   const ObservationDocument *od;
   AlertDocument A; 
+  AntPropDocument last_antprop; // keep a copy of antenna properties
 
   struct timespec ts_500ms = get_ms_ts (500);
   struct timespec ts_100ms = get_ms_ts (100);
@@ -439,6 +440,8 @@ int main(int argc, char** argv)
       if (D.type == SCANINFO_ANTPROP) {
 
         const AntPropDocument* ap = &(D.data.antProp);
+        // copy
+        last_antprop = *ap;
 
         sprintf (scaninfofile,"%s/%s.antprop.txt",OBSINFODIR,ap->datasetId);
         sfd = fopen (scaninfofile,"w");
@@ -464,7 +467,6 @@ int main(int argc, char** argv)
       }
 
       parseAlertDocument (&A, msg);
-      //if((strcmp(A.monitorName,"ELPosError") == 0 || strcmp(A.monitorName,"AZPosError") == 0) && A.alertState == 1) {
       if (write_alerts && (strcmp (A.monitorName,"ELPosError") == 0 || strcmp (A.monitorName,"AZPosError") == 0)) {
         //printAlertDocument(&A);
         //printf("alertState = %d\n", A.alertState);
