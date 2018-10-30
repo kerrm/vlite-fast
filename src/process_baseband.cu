@@ -2115,12 +2115,19 @@ __global__ void sel_and_dig_2b (
     {
       // from Table 3 of Jenet & Anderson 1998
       //float tmp = fft_ave[time_idx*NCHAN+chan_idx+CHANMIN+j]/0.9674 + 1.5;
-      float tmp = fft_ave[pol_idx*NTIME*NCHAN + time_idx*NCHAN+chan_idx+CHANMIN+j]/0.9675 + 1.5;
-      if (tmp < 1) // do nothing, bit already correctly set
+      // NB below formulation isn't quite right, as 0.9674 is the
+      // *threshold*, whereas this puts the threshold in the middle of
+      // a cell (as written)
+      //float tmp = fft_ave[pol_idx*NTIME*NCHAN + time_idx*NCHAN+chan_idx+CHANMIN+j]/0.9674 + 1.5;
+      float tmp = fft_ave[pol_idx*NTIME*NCHAN + time_idx*NCHAN+chan_idx+CHANMIN+j]/0.9674 + 1.0;
+      // Now, -0.9674 maps to 0, should be 0/1 boundary
+      //       0.0000 maps to 1, should be 1/2 boundary
+      //      +0.9674 maps to 2, should be 2/3 boundary
+      if (tmp < 0) // do nothing, bit already correctly set
         continue;
-      if (tmp < 2)
+      if (tmp < 1)
         fft_trim_u[i] += 1 << 2*j;
-      else if (tmp < 3)
+      else if (tmp < 2)
         fft_trim_u[i] += 2 << 2*j;
       else
         fft_trim_u[i] += 3 << 2*j;
