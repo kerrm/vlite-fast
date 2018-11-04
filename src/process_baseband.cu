@@ -488,10 +488,16 @@ int main (int argc, char *argv[])
 
   // extra factor of 2 to store both power and kurtosis statistics
   // storage for high time resolution and filterbank block ("fb") scales
-  cufftReal* kur_dev=NULL; if (RFI_MODE) cudacheck (
-  cudaMalloc ((void**)&kur_dev,2*sizeof(cufftReal)*nkurto_per_chunk) );
-  cufftReal* kur_fb_dev=NULL; if (RFI_MODE) cudacheck (
-  cudaMalloc ((void**)&kur_fb_dev,2*sizeof(cufftReal)*fft_per_chunk) );
+  cufftReal *pow_dev(NULL), *kur_dev(NULL), 
+            *pow_fb_dev(NULL), *kur_fb_dev(NULL);
+  if (RFI_MODE) {
+    cudacheck (
+      cudaMalloc ((void**)&pow_dev,2*sizeof(cufftReal)*nkurto_per_chunk) );
+    cudacheck (
+      cudaMalloc ((void**)&pow_fb_dev,2*sizeof(cufftReal)*fft_per_chunk) );
+    kur_dev = pow_dev + nkurto_per_chunk;
+    kur_fb_dev = pow_fb_dev + fft_per_chunk;
+  }
 
   // store D'Agostino statistic for thresholding
   // only using one per pol now, but keep memory size for both pols
@@ -1090,24 +1096,23 @@ int main (int argc, char *argv[])
 
         // calculate high time resolution kurtosis (250 or 500 samples)
         kurtosis <<<nkurto_per_chunk, 256>>> (
-            fft_in,kur_dev,kur_dev+nkurto_per_chunk);
+            fft_in,pow_dev,kur_dev);
         cudacheck (cudaGetLastError () );
 
         // compute the thresholding statistic
-        // NB now modified to combine polarizations;;;;
+        // NB now modified to combine polarizations
         compute_dagostino <<<nsms*32,NTHREAD>>> (
-            kur_dev+nkurto_per_chunk,dag_dev,nkurto_per_chunk/2);
+            kur_dev,dag_dev,nkurto_per_chunk/2);
         cudacheck (cudaGetLastError () );
 
         // calculate coarser kurtosis (for entire filterbank sample, e.g. 12500 samples)
         // NB this relies on results of previous D'Agostino calculation
         block_kurtosis <<<fft_per_chunk/8,256>>> (
-            kur_dev,kur_dev+nkurto_per_chunk,dag_dev,
-            kur_fb_dev,kur_fb_dev+fft_per_chunk);
+            pow_dev,kur_dev,pow_fb_dev,kur_fb_dev);
         cudacheck (cudaGetLastError () );
         // NB now modified to combine polarizations
         compute_dagostino2 <<<nsms*32,NTHREAD>>> (
-            kur_fb_dev+fft_per_chunk,dag_fb_dev,fft_per_chunk/2);
+            kur_fb_dev,dag_fb_dev,fft_per_chunk/2);
         cudacheck (cudaGetLastError () );
 
         cudacheck (cudaMemset (
@@ -2113,21 +2118,16 @@ __global__ void sel_and_dig_2b (
     fft_trim_u[i] = 0;
     for (int j = 0; j < 4; ++j)
     {
-      // from Table 3 of Jenet & Anderson 1998
-      //float tmp = fft_ave[time_idx*NCHAN+chan_idx+CHANMIN+j]/0.9674 + 1.5;
-      // NB below formulation isn't quite right, as 0.9674 is the
-      // *threshold*, whereas this puts the threshold in the middle of
-      // a cell (as written)
-      //float tmp = fft_ave[pol_idx*NTIME*NCHAN + time_idx*NCHAN+chan_idx+CHANMIN+j]/0.9674 + 1.5;
-      float tmp = fft_ave[pol_idx*NTIME*NCHAN + time_idx*NCHAN+chan_idx+CHANMIN+j]/0.9674 + 1.0;
-      // Now, -0.9674 maps to 0, should be 0/1 boundary
-      //       0.0000 maps to 1, should be 1/2 boundary
-      //      +0.9674 maps to 2, should be 2/3 boundary
-      if (tmp < 0) // do nothing, bit already correctly set
+      // I have now done an optimization of the input thresholds for the
+      // approximate data format (chi^2 with 16 dof) assuming uniform
+      // output.  This has about 5% more distortion than optimal output
+      // with nonuniform steps, but is simpler for downstream applications.
+      float tmp = fft_ave[pol_idx*NTIME*NCHAN + time_idx*NCHAN+chan_idx+CHANMIN+j];
+      if (tmp < -0.6109) // do nothing, bit already correctly set
         continue;
-      if (tmp < 1)
+      if (tmp < 0.3970)
         fft_trim_u[i] += 1 << 2*j;
-      else if (tmp < 2)
+      else if (tmp < 1.4050)
         fft_trim_u[i] += 2 << 2*j;
       else
         fft_trim_u[i] += 3 << 2*j;
