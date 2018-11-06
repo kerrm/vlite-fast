@@ -1108,7 +1108,7 @@ int main (int argc, char *argv[])
         // calculate coarser kurtosis (for entire filterbank sample, e.g. 12500 samples)
         // NB this relies on results of previous D'Agostino calculation
         block_kurtosis <<<fft_per_chunk/8,256>>> (
-            pow_dev,kur_dev,pow_fb_dev,kur_fb_dev);
+            pow_dev,kur_dev,dag_dev,pow_fb_dev,kur_fb_dev);
         cudacheck (cudaGetLastError () );
         // NB now modified to combine polarizations
         compute_dagostino2 <<<nsms*32,NTHREAD>>> (

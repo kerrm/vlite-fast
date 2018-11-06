@@ -3,7 +3,7 @@
 # genbase with psrdada; this will work if run as vliteops on any
 # vlite-difx node
 
-export LD_LIBRARY_PATH=/home/vlite-master/mtk/lib:/usr/cuda-6.5/lib64:${LD_LIBRARY_PATH}
+export LD_LIBRARY_PATH=/home/vlite-master/mtk/lib:/usr/cuda/lib64:${LD_LIBRARY_PATH}
 
 sudo killall process_baseband
 sudo killall genbase
@@ -17,8 +17,8 @@ sleep 0.1
 sleep 0.1
 
 # run baseband generation in background
-/home/vlite-master/mtk/src/genbase -t 60 -n 2 -d 10 -a 0.05 -s 0.1 -p 0.5 -r 102 &
-sleep 0.1
+/home/vlite-master/mtk/src/genbase -t 20 -n 1 -d 10 -a 0.05 -s 0.1 -p 0.5 -r 102 -f &
+sleep 0.2
 
 # run in debugger if needed
 #gdb -ex=r --args /home/vlite-master/mtk/src/process_baseband -p 0 -k 40 -K 0 -w 1 -b 2 -P 1 -o

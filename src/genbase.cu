@@ -10,6 +10,7 @@
 #include <time.h>
 #include <cufft.h>
 #include <curand.h>
+#include <curand_kernel.h>
 #include <helper_cuda.h>
 
 #include "vdifio.h"
@@ -26,6 +27,7 @@
 #define DEVICE 0        //GPU. on furby: 0 = TITAN Black, 1 = GTX 780
 #define NTHREAD 512
 #define WRITE_DADA 1 // write to psrdada output
+#define NMOMENT 256
 
 #define VD_FRM 5032
 #define VD_DAT 5000
@@ -34,12 +36,16 @@
 #define VLITE_FRAME_RATE 25600
 
 
-__global__ void init_dm_kernel(cufftComplex *fker_dev, float dm, size_t n);
-__global__ void set_profile(cufftReal *fdat_dev, size_t current_sample, 
+__global__ void init_dm_kernel (cufftComplex *fker_dev, float dm, size_t n);
+__global__ void set_profile (cufftReal *fdat_dev, size_t current_sample, 
     size_t period, float ampl, size_t n);
-__global__ void multiply_kernel(cufftComplex* dat,cufftComplex* ker, size_t n);
-__global__ void swap_sideband(cufftReal *dat, size_t n);
-__global__ void digitize(float* idat, uint8_t* udat, size_t n);
+__global__ void multiply_kernel (cufftComplex* dat,cufftComplex* ker, size_t n);
+__global__ void swap_sideband (cufftReal *dat, size_t n);
+__global__ void setup_dstate (curandState *state);
+__global__ void measure_moments (cufftReal* dat, float *moments);
+__global__ void add_rfi (cufftReal *dat, size_t n, curandState *d_state,
+    size_t current_sample, double tsamp_in_mus);
+__global__ void digitize (float* idat, uint8_t* udat, size_t n);
 
 void usage ()
 {
@@ -62,7 +68,8 @@ int main(int argc, char *argv[])
   int nobs = 1;
   int arg = 0;
   long seed = 42;
-  while ((arg = getopt(argc, argv, "ht:n:p:a:s:d:r:")) != -1) {
+  int do_add_rfi = 0;
+  while ((arg = getopt(argc, argv, "hft:n:p:a:s:d:r:f")) != -1) {
 
     switch (arg) {
 
@@ -89,6 +96,7 @@ int main(int argc, char *argv[])
         fprintf (stderr, "genbase: could not read ampl.from %s\n", optarg);
         return -1;
       }
+      break;
 
     case 's':
       float scale;
@@ -104,18 +112,26 @@ int main(int argc, char *argv[])
         fprintf (stderr, "genbase: could not read DM from %s\n", optarg);
         return -1;
       }
+      break;
 
     case 'p':
       if (sscanf (optarg, "%lf", &pulse_period) != 1) {
         fprintf (stderr, "genbase: could not read period from %s\n", optarg);
         return -1;
       }
+      break;
 
     case 'r':
       if (sscanf (optarg, "%li", &seed) != 1) {
         fprintf (stderr, "genbase: could not read seed from %s\n", optarg);
         return -1;
       }
+      break;
+
+    case 'f':
+      printf ("genbase: adding RFI\n" );
+      do_add_rfi = 1;
+      break;
 
     }
   }
@@ -174,6 +190,15 @@ int main(int argc, char *argv[])
   size_t new_samps = buflen - n_dm_samp;
   uint8_t* udat_dev; cudacheck (
   cudaMalloc ((void**)&udat_dev, new_samps) );
+
+  // allocate memory and initialize state for curand; NB that we need a
+  // state for *each* thread
+  curandState *d_state;
+  if (do_add_rfi)
+  {
+    cudaMalloc(&d_state, sizeof(curandState)*NTHREAD*32);
+    setup_dstate <<<32,NTHREAD>>> (d_state);
+  }
 
   // allocate host memory; only copy over the unpolluted samples
   // leave room for a ragged edge VDIF frame
@@ -279,6 +304,11 @@ int main(int argc, char *argv[])
   size_t current_frame = 0;
   int frame_seconds = 0;
 
+  // sanity checks on voltage levels
+  //float moments[2] = {0,0};
+  //float* moments_dev;
+  //cudaMalloc ((void**)&moments_dev, sizeof(float)*2);
+
   while (current_sample < end_sample)
   {
     
@@ -316,7 +346,31 @@ int main(int argc, char *argv[])
       swap_sideband <<<32*nsms, NTHREAD>>> (fdat_dev, buflen);
       cudacheck ( cudaGetLastError() );
 
-      // digitize to 8-bit uints; while doing this, select only valid samples
+      /*
+      // an optional sanity check on the moments; last calculation showed
+      // they nicedly followed a standard normal distribution
+      moments[0] = 0;
+      moments[1] = 0;
+      cudacheck (cudaMemcpy (moments_dev, moments, 2*sizeof(float),
+          cudaMemcpyHostToDevice));
+
+      measure_moments <<< buflen/256, 256>>> (fdat_dev, moments_dev);
+      cudacheck ( cudaGetLastError() );
+      cudacheck (cudaMemcpy (moments, moments_dev, 2*sizeof(float), cudaMemcpyDeviceToHost) );
+      moments[0] *= double(256)/buflen;
+      moments[1] *= double(256)/buflen;
+      printf ("moment2 %.6f %.6f\n", moments[0], sqrt(moments[0]));
+      printf ("moment4 %.6f\n", moments[1]);
+      */
+
+      if (do_add_rfi)
+      {
+        add_rfi <<<32, NTHREAD>>> (fdat_dev, buflen, d_state, 
+            current_sample, tsamp*1e6);
+        cudacheck ( cudaGetLastError() );
+      }
+
+      // digitize to 8-bit uints; simultaneously select only valid samples
       digitize <<<32*nsms, NTHREAD>>> (
           (float*)(fdat_dev+n_dm_samp_lo), udat_dev, new_samps);
       cudacheck ( cudaGetLastError() );
@@ -431,7 +485,7 @@ __global__ void set_profile(cufftReal *dat, size_t current_sample,
     */
     sample -= (sample/period)*period;
     float phase = float(sample)/period;
-    if (phase < 0.05)
+    if (phase < 0.03)
     {
       //float tmp =1-abs(phase/0.025-1);
       //float amp = 1+tmp*tmp;
@@ -454,6 +508,57 @@ __global__ void multiply_kernel(cufftComplex* dat,cufftComplex* ker, size_t n)
   }
 }
 
+__global__ void measure_moments (cufftReal* dat, float *moments)
+{
+  unsigned int tid = threadIdx.x;
+  size_t offset = blockIdx.x*NMOMENT;
+
+  // general plan of work: do explicit sum within each warp
+  volatile __shared__ float data2[256];
+  volatile __shared__ float data4[256];
+
+  data2[tid] = dat[offset + tid]*dat[offset + tid];
+  data4[tid] = data2[tid]*data2[tid];
+
+  __syncthreads ();
+
+  if (tid < 128)
+  {
+    data2[tid] += data2[tid + 128];
+    data4[tid] += data4[tid + 128];
+  }
+  __syncthreads ();
+
+  if (tid < 64)
+  {
+    data2[tid] += data2[tid + 64];
+    data4[tid] += data4[tid + 64];
+  }
+  __syncthreads ();
+
+  if (tid < 32)
+  {
+    data2[tid] += data2[tid + 32];
+    data4[tid] += data4[tid + 32];
+    data2[tid] += data2[tid + 16];
+    data4[tid] += data4[tid + 16];
+    data2[tid] += data2[tid + 8];
+    data4[tid] += data4[tid + 8];
+    data2[tid] += data2[tid + 4];
+    data4[tid] += data4[tid + 4];
+    data2[tid] += data2[tid + 2];
+    data4[tid] += data4[tid + 2];
+  }
+
+  if (tid==0)
+  {
+    data2[tid] += data2[tid + 1];
+    data4[tid] += data4[tid + 1];
+    atomicAdd (moments + 0, data2[0] / NMOMENT );
+    atomicAdd (moments + 1, data4[0] / NMOMENT );
+  }
+}
+
 __global__ void swap_sideband(cufftReal* dat, size_t n)
 {
   for (
@@ -463,6 +568,32 @@ __global__ void swap_sideband(cufftReal* dat, size_t n)
   {
     if (i & 1)
       dat[i] = -dat[i];
+  }
+}
+
+__global__ void setup_dstate(curandState *state)
+{
+
+  int idx = threadIdx.x+blockDim.x*blockIdx.x;
+  curand_init(idx, 0, 0, &state[idx]);
+}
+
+// Add roughly 1 mus of RFI every 10 mus of data.
+__global__ void add_rfi(cufftReal* dat, size_t n, curandState *d_state, size_t current_sample, double tsamp_in_mus)
+{
+  curandState *state = &d_state[threadIdx.x + blockIdx.x*NTHREAD];
+  for (
+      int i = threadIdx.x + blockIdx.x*blockDim.x; 
+      i < n; 
+      i += blockDim.x*gridDim.x)
+  {
+
+    float phase = fmodf((i+current_sample) * (tsamp_in_mus/123456),1);
+    if (phase < 0.1)
+    {
+      // Quick and dirty, add an alternating uniform signal
+      dat[i] += 3.*(curand_uniform (state) - 0.5);
+    }
   }
 }
 
