@@ -1,6 +1,6 @@
 #!/bin/bash
 #set -x
-conf="/home/vlite-master/mtk/config/manual"
+conf="../config/manual"
 grep -v "^#" < ${conf} | while read LINE
 do
 echo ${LINE}

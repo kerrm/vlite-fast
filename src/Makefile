@@ -14,8 +14,17 @@ PACKAGE_DIR = ../..
 
 all: process_baseband genbase readbase messenger writer
 
+install:
+	cp -p process_baseband ${PACKAGE_DIR}/bin
+	cp -p genbase ${PACKAGE_DIR}/bin
+	cp -p readbase ${PACKAGE_DIR}/bin
+	cp -p messenger ${PACKAGE_DIR}/bin
+	cp -p writer ${PACKAGE_DIR}/bin
+
 process_baseband: process_baseband.o util.o cuda_util.o utils.o
-	$(NVCC) -o process_baseband process_baseband.o utils.o util.o cuda_util.o -lcufft -lcurand -L${PACKAGE_DIR}/lib -lvdifio -lpsrdada
+	$(NVCC) -o $@ $@.o utils.o util.o cuda_util.o -lcufft -lcurand -L${PACKAGE_DIR}/lib -lvdifio -lpsrdada
+	chmod a+rx $@
+	chgrp vlite $@
 
 process_baseband.o: process_baseband.cu process_baseband.h
 	$(NVCC) -g -O2 $(CUDA_ARCH) --compiler-options -Wall -c -o $@ -I${CUDA_DIR}/include -I${PACKAGE_DIR}/include process_baseband.cu 
@@ -23,21 +32,26 @@ process_baseband.o: process_baseband.cu process_baseband.h
 genbase: genbase.cu util.o cuda_util.o
 	$(NVCC) -g -O2 $(CUDA_ARCH) --compiler-options -Wall -I${CUDA_DIR}/include -I${CUDA_DIR}/samples/common/inc -I${PACKAGE_DIR}/include -c genbase.cu
 	$(NVCC) -o genbase util.o cuda_util.o genbase.o -lcufft -lcurand -L${PACKAGE_DIR}/lib -lvdifio -lpsrdada
+	chmod a+rx $@
+	chgrp vlite $@
 
 readbase:	readbase.c util.o
 	g++ -g -O2 -Wall -c readbase.c -I${PACKAGE_DIR}/include
 	g++ -o $@ readbase.o util.o -L${PACKAGE_DIR}/lib -lpsrdada
 	chmod a+rx $@
+	chgrp vlite $@
 
 messenger:	messenger.c def.h utils.o $(PARSE_FILES)
 	gcc -g -O2 -Wall -std=gnu99 -c messenger.c $(PARSE_FILES) -I${PACKAGE_DIR}/include -I$(INCDIFXMESSAGE)
 	gcc -o $@ messenger.o utils.o $(PARSE_OBJ) -L${PACKAGE_DIR}/lib -lexpat -lpsrdada
 	chmod a+rx $@
+	chgrp vlite $@
 
 writer:	writer.c def.h utils.o
 	gcc -g -O2 -Wall -std=gnu99 -pthread -c writer.c -I${PACKAGE_DIR}/include -I$(INCDIFXMESSAGE)
 	gcc -o $@ writer.o utils.o -pthread -L${PACKAGE_DIR}/lib -lpsrdada -lvdifio
 	chmod a+rx $@
+	chgrp vlite $@
 
 util.o: util.h util.c
 	g++ -g -O2 -Wall -c util.c -I${PACKAGE_DIR}/include
