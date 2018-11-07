@@ -25,7 +25,7 @@ process_baseband: process_baseband.o util.o cuda_util.o utils.o
 	$(NVCC) -o $@ $@.o utils.o util.o cuda_util.o -lcufft -lcurand -L${PACKAGE_DIR}/lib -lvdifio -lpsrdada
 	chmod a+rx $@
 
-process_baseband.o: process_baseband.cu process_baseband.h
+process_baseband.o: process_baseband.cu process_baseband.h def.h
 	$(NVCC) -g -O2 $(CUDA_ARCH) --compiler-options -Wall -c -o $@ -I${CUDA_DIR}/include -I${PACKAGE_DIR}/include process_baseband.cu 
 
 genbase: genbase.cu util.o cuda_util.o
