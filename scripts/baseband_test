@@ -3,7 +3,8 @@
 # genbase with psrdada; this will work if run as vliteops on any
 # vlite-difx node
 
-export LD_LIBRARY_PATH=/home/vlite-master/mtk/lib:/usr/cuda/lib64:${LD_LIBRARY_PATH}
+PACKAGE_DIR=/home/vlite-master/mtk
+export LD_LIBRARY_PATH=${PACKAGE_DIR}/lib:/usr/cuda/lib64:${LD_LIBRARY_PATH}
 
 sudo killall process_baseband
 sudo killall genbase
@@ -17,17 +18,17 @@ sleep 0.1
 sleep 0.1
 
 # run baseband generation in background
-/home/vlite-master/mtk/src/genbase -t 20 -n 1 -d 10 -a 0.05 -s 0.1 -p 0.5 -r 102 -f &
+${PACKAGE_DIR}/bin/genbase -t 20 -n 1 -d 10 -a 0.05 -s 0.1 -p 0.5 -r 102 -f &
 sleep 0.2
 
 # run in debugger if needed
 #gdb -ex=r --args /home/vlite-master/mtk/src/process_baseband -p 0 -k 40 -K 0 -w 1 -b 2 -P 1 -o
-/home/vlite-master/mtk/src/process_baseband -p 0 -k 40 -K 0 -w 1 -b 2 -P 1 -r 2 -o
+${PACKAGE_DIR}/bin/process_baseband -p 0 -k 40 -K 0 -w 1 -b 2 -P 1 -r 2 -o
 
 #sleep 0.5
 #/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 62500 -gpu_id 0 -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -k 42 -V
 
 sleep 0.5
-sudo /home/vlite-master/mtk/bin/dada_db -k 40 -d
-sudo /home/vlite-master/mtk/bin/dada_db -k 42 -d
-sudo /home/vlite-master/mtk/bin/dada_db -k 44 -d
+sudo ${PACKAGE_DIR}/bin/dada_db -k 40 -d
+sudo ${PACKAGE_DIR}/bin/dada_db -k 42 -d
+sudo ${PACKAGE_DIR}/bin/dada_db -k 44 -d
