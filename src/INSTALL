@@ -1,0 +1,17 @@
+Package depedencies:
+
+Relies on
+ -- heimdall
+ -- dedisp
+ -- vdifio
+ -- psrdada
+ -- cuda
+
+ Reliance on heimdall and dedisp is simply through command line, so they
+ can be installed anywhere so long as they are in the path.
+ 
+ The default Makefile will work if libraries and headers for vdifio and
+ psrdada are available in the location referred to by PACKAGE_DIR, update
+ Makefile as appropriate.
+
+ Update CUDA directory in Makefile.
