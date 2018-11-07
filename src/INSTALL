@@ -1,10 +1,10 @@
 Package depedencies:
 
 Relies on
- -- heimdall
- -- dedisp
- -- vdifio
- -- psrdada
+ -- heimdall [sourceforge fork of heimdall (gilgalad55)]
+ -- dedisp [github fork of dedisp (gilgalad55)]
+ -- vdifio [from Paul Demorest's github]
+ -- psrdada [from sourceforge]
  -- cuda
 
  Reliance on heimdall and dedisp is simply through command line, so they
