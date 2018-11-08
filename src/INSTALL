@@ -9,6 +9,10 @@ Relies on
 
  Reliance on heimdall and dedisp is simply through command line, so they
  can be installed anywhere so long as they are in the path.
+
+ NB that in heimdall installation, it is good to set CUDA_NVCC_FLAGS as an
+ environment variable to get the correct gencode settings.  (See
+ src/Makefile for settings appropriate for the VLITE-Fast GPUs.)
  
  The default Makefile will work if libraries and headers for vdifio and
  psrdada are available in the location referred to by PACKAGE_DIR, update

@@ -1,0 +1,20 @@
+#!/bin/bash
+#set -x
+PACKAGE_DIR=/home/vlite-master/mtk
+conf="../config/debug"
+grep -v "^#" < ${conf} | while read LINE
+do
+#echo ${LINE}
+toks=( $LINE )
+echo "run this line on the appropriate node:"
+echo "${PACKAGE_DIR}/vlite-fast/scripts/start_single ${LINE}"
+done
+read -n 1 -s -p "Press any key to continue once you've done that."
+if [ $# -gt 0 ]
+then
+echo "Connect via telnet to vlite-nrl:${1}."
+${PACKAGE_DIR}/bin/messenger -m ${1} ${conf}
+else
+${PACKAGE_DIR}/bin/messenger ${conf}
+fi
+

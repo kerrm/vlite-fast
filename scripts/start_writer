@@ -7,7 +7,7 @@
 # $3 = info port
 # $4 = baseband dada key
 PACKAGE_DIR=/home/vlite-master/mtk
-./start_dada ${4} 257638400 32
+${PACKAGE_DIR}/vlite-fast/scripts/start_dada ${4} 257638400 32
 ${PACKAGE_DIR}/bin/writer -e ${1} -p ${2} -i ${3} -k ${4} -o
 # allow some time for buffer to empty before killing it
 wait $(pgrep process_baseband)
