@@ -8,7 +8,7 @@
 # $1 = dada key
 # $2 = size in bytes
 # $3 = number of buffers
-PACKAGE_DIR=/home/vlite-master/mtk
+PACKAGE_DIR=../..
 ${PACKAGE_DIR}/bin/dada_db -k ${1} -l -b ${2} -n ${3}
 # check return value of output for success
 if [ $? -ne 0 ]

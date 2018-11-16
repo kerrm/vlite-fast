@@ -8,24 +8,26 @@ PARSE_HEADERS = efaults.h  eop.h  executor.h  options.h  vlaant.h  vlite_xml.h m
 #F77 = gfortran -std=legacy -ffixed-line-length-none 
 CC = gcc
 NVCC = nvcc
-CUDA_ARCH = -gencode arch=compute_35,code=sm_35 -gencode arch=compute_52,code=sm_52 -gencode arch=compute_61,code=sm_61
+#CUDA_ARCH = -gencode arch=compute_35,code=sm_35 -gencode arch=compute_52,code=sm_52 -gencode arch=compute_61,code=sm_61
+CUDA_ARCH = -gencode arch=compute_35,code=sm_35 
 CUDA_DIR = /usr/cuda
 PACKAGE_DIR = ../..
 
-all: process_baseband genbase readbase messenger writer
+#all: process_baseband genbase readbase messenger writer
+all: process_baseband genbase install
 
 install:
 	cp -p process_baseband ${PACKAGE_DIR}/bin
 	cp -p genbase ${PACKAGE_DIR}/bin
-	cp -p readbase ${PACKAGE_DIR}/bin
-	cp -p messenger ${PACKAGE_DIR}/bin
-	cp -p writer ${PACKAGE_DIR}/bin
+	#cp -p readbase ${PACKAGE_DIR}/bin
+	#cp -p messenger ${PACKAGE_DIR}/bin
+	#cp -p writer ${PACKAGE_DIR}/bin
 
 process_baseband: process_baseband.o util.o cuda_util.o utils.o
 	$(NVCC) -o $@ $@.o utils.o util.o cuda_util.o -lcufft -lcurand -L${PACKAGE_DIR}/lib -lvdifio -lpsrdada
 	chmod a+rx $@
 
-process_baseband.o: process_baseband.cu process_baseband.h def.h
+process_baseband.o: process_baseband.cu process_baseband.h def.h utils.h
 	$(NVCC) -g -O2 $(CUDA_ARCH) --compiler-options -Wall -c -o $@ -I${CUDA_DIR}/include -I${PACKAGE_DIR}/include process_baseband.cu 
 
 genbase: genbase.cu util.o cuda_util.o

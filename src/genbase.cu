@@ -1,3 +1,16 @@
+/* Current status:
+
+   11/14/2018
+
+   Seems to be working fine, but I note that there are some issues with
+   buffer pollution for the case of smeared pulse widths comparable to the
+   buffer width.  NOT equal, I find empirically that for the data to look
+   reasonable in a filterbank analysis the buffer should contain several
+   periods worth of data.  This is currently checked for below.  It would
+   be nice to understand why it isn't the more reasonable 
+   buffer > dm_smearing but there are only so many hours in the day.
+
+*/
 #include <iostream>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,7 +39,7 @@
 
 #define DEVICE 0        //GPU. on furby: 0 = TITAN Black, 1 = GTX 780
 #define NTHREAD 512
-#define WRITE_DADA 1 // write to psrdada output
+#define WRITE_DADA 1 // 0 write to file, 1 write to psrdada buffer
 #define NMOMENT 256
 
 #define VD_FRM 5032
@@ -51,12 +64,14 @@ void usage ()
 {
   fprintf(stdout,"Usage: genbase [options]\n"
 	  "-t seconds to simulate (default: 5)"
+	  "-n observations to simulate (default: 1)\n"
 	  "-p pulse period [s; default 0.5]"
 	  "-a amplitude as fraction of Tsys [default 0.05]"
 	  "-s scale of second polarization relative to first [default 1.0]"
 	  "-r seed for random number generator [long; default=42]"
 	  "-d dm [default=30; NB this is about the largest feasible]"
-	  "-n observations to simulate (default: 1)\n");
+	  "-e write to disk rather than psrdada buffer (default: false)"
+	  "-f add RFI to observations (default: false)");
 }
 
 int main(int argc, char *argv[])
@@ -64,12 +79,14 @@ int main(int argc, char *argv[])
   double tobs = 5;
   double dm = 30;
   double pulse_period = 0.5;
-  float ampls[2] = {1.05,1.05};
+  float ampls[2] = {0.05,0.05};
+  float poln_ratio = 1.;
   int nobs = 1;
   int arg = 0;
   long seed = 42;
   int do_add_rfi = 0;
-  while ((arg = getopt(argc, argv, "hft:n:p:a:s:d:r:f")) != -1) {
+  int write_to_dada = 1;
+  while ((arg = getopt(argc, argv, "hfet:n:p:a:s:d:r:")) != -1) {
 
     switch (arg) {
 
@@ -99,12 +116,10 @@ int main(int argc, char *argv[])
       break;
 
     case 's':
-      float scale;
-      if (sscanf (optarg, "%f", &scale) != 1) {
-        fprintf (stderr, "genbase: could not read scale from %s\n", optarg);
+      if (sscanf (optarg, "%f", &poln_ratio) != 1) {
+        fprintf (stderr, "genbase: could not pol'n ratio from %s\n", optarg);
         return -1;
       }
-      ampls[1] = ampls[0]*scale;
       break;
 
     case 'd':
@@ -133,8 +148,16 @@ int main(int argc, char *argv[])
       do_add_rfi = 1;
       break;
 
+    case 'e':
+      printf ("genbase: writing to disk\n" );
+      write_to_dada = 0;
+      break;
+
     }
   }
+
+  // apply any polarization scaling
+  ampls[1] = ampls[0] * poln_ratio;
 
   // set up sample counts for given DM
   double freq = 352;
@@ -144,30 +167,42 @@ int main(int argc, char *argv[])
   printf("Sampling time is %g.\n",tsamp);
   double t_dm_lo = dm/2.41e-10*(1./(freq_lo*freq_lo)-1./(freq*freq)); // mus
   double t_dm_hi = dm/2.41e-10*(1./(freq*freq)-1./(freq_hi*freq_hi)); // mus
-  printf ("DM smearing time to bottom of band is %2f.\n",t_dm_lo);
-  printf ("DM smearing time to top of band is %.2f.\n",t_dm_hi);
+  printf ("DM smearing time to bottom of band is %.2f ms.\n",t_dm_lo*1e-3);
+  printf ("DM smearing time to top of band is %.2f ms.\n",t_dm_hi*1e-3);
+  printf ("deltaDM smearing time is %.2f ms.\n",(t_dm_lo-t_dm_hi)*1e-3);
   unsigned long n_dm_samp_lo = (unsigned long) t_dm_lo*1e-6/tsamp;
   unsigned long n_dm_samp_hi = (unsigned long) t_dm_hi*1e-6/tsamp;
   printf ("DM smearing samples to bottom of band is %li.\n",n_dm_samp_lo);
   printf ("DM smearing samples to top of band is %li.\n",n_dm_samp_hi);
   n_dm_samp_lo += (n_dm_samp_lo & 1); // make it even
   n_dm_samp_hi += (n_dm_samp_hi & 1); // make it even
+  {
+    unsigned long tmp = n_dm_samp_lo;
+    n_dm_samp_lo = n_dm_samp_hi;
+    n_dm_samp_hi = tmp;
+  }
   unsigned long n_dm_samp = n_dm_samp_lo + n_dm_samp_hi;
   printf("DM total samples is %li.\n",n_dm_samp);
+
+  // pulse properties
+  size_t period = size_t(pulse_period/tsamp);
+  printf ("Pulse period is %li samples.\n",period);
+
+  // allocate memory for 1s of data; NB this is a large buffer, but because
+  // of edge effects, will discard ~0.37s of data at DM=30!
+  size_t buflen = VLITE_RATE/2;
+
+  if (buflen < 2*(n_dm_samp + pulse_period))
+  {
+    fprintf (stderr, "Buffer not long enough to perform dedispersion!");
+    exit (EXIT_FAILURE);
+  }
 
   // initialize GPU properties
   cudacheck (cudaSetDevice (DEVICE));
   int nsms;
   cudaDeviceGetAttribute(&nsms,cudaDevAttrMultiProcessorCount,DEVICE);
 
-  // allocate memory for 1s of data; NB this is a large buffer, but because
-  // of edge effects, will discard ~0.37s of data at DM=30!
-  size_t buflen = VLITE_RATE/4;
-  if (buflen < n_dm_samp)
-  {
-    fprintf (stderr, "Buffer not long enough to perform dedispersion!");
-    exit (EXIT_FAILURE);
-  }
   cufftReal* fdat_dev; cudacheck (
   cudaMalloc ((void**)&fdat_dev, sizeof(cufftReal)*buflen) );
 
@@ -230,20 +265,22 @@ int main(int argc, char *argv[])
   setVDIFFrameBytes (hdr, VD_FRM);
   setVDIFNumChannels (hdr,1);
 
-  // connect to the output buffer
-#if WRITE_DADA
+  // if using PSRDADA, connect to the output buffer
   key_t key = 0x40;
-  multilog_t* log = multilog_open ("genbase",0);
-  dada_hdu_t* hdu = dada_hdu_create (log);
-  dada_hdu_set_key (hdu,key);
-  dada_hdu_connect (hdu);
-#else
-  FILE *output_fp = myopen("/data/VLITE/kerrm/baseband_sim.uw","wb");
-#endif
-
-  // pulse properties
-  size_t period = size_t(pulse_period/tsamp);
-  printf ("Pulse period is %li samples.\n",period);
+  multilog_t* log=NULL;
+  dada_hdu_t* hdu=NULL;
+  FILE *output_fp=NULL;
+  if (write_to_dada)
+  {
+    log = multilog_open ("genbase",0);
+    hdu = dada_hdu_create (log);
+    dada_hdu_set_key (hdu,key);
+    dada_hdu_connect (hdu);
+  }
+  else
+  {
+    output_fp = myopen("/data/kerrm/baseband_sim.uw","wb");
+  }
 
 
   // set time for current set of data; will change after generating apt.
@@ -269,35 +306,38 @@ int main(int argc, char *argv[])
   }
   current_sample += n_dm_samp;
 
-  // connect to DADA buffer and set current system time for epoch
-  dada_hdu_lock_write (hdu);
-  setVDIFFrameTime (hdr, time (NULL) );
+  if (write_to_dada)
+  {
+    // connect to DADA buffer and set current system time for epoch
+    dada_hdu_lock_write (hdu);
+    setVDIFFrameTime (hdr, time (NULL) );
 
-  // write psrdada output header values
-  char* ascii_hdr = ipcbuf_get_next_write (hdu->header_block);
-  dadacheck (ascii_header_set (ascii_hdr, "NAME", "%s", "B0833-45" ) );
-  dadacheck (ascii_header_set (ascii_hdr, "NCHAN", "%d", 1) );
-  dadacheck (ascii_header_set (ascii_hdr, "BANDWIDTH", "%lf", 64) );
-  dadacheck (ascii_header_set (ascii_hdr, "CFREQ", "%lf", 352) );
-  dadacheck (ascii_header_set (ascii_hdr, "NPOL", "%d", 2) );
-  dadacheck (ascii_header_set (ascii_hdr, "NBIT", "%d", 8) );
-  dadacheck (ascii_header_set (ascii_hdr, "RA", "%lf", 0.87180) );
-  dadacheck (ascii_header_set (ascii_hdr, "DEC", "%lf", 0.72452) );
-  // NB psrdada format has TSAMP in microseconds
-  //dadacheck (ascii_header_set (ascii_hdr, "TSAMP", "%lf", tsamp*1e6) );
-  // set up epoch appropriately -- first, make a tm struct for VDIF epoch
-  struct tm tm_epoch = {0};
-  int vdif_epoch = getVDIFEpoch (hdr);
-  tm_epoch.tm_year = 100 + vdif_epoch/2;
-  tm_epoch.tm_mon = 6*(vdif_epoch%2);
-  time_t epoch_seconds = mktime (&tm_epoch) + getVDIFFrameEpochSecOffset (hdr);
-  struct tm* utc_time = gmtime (&epoch_seconds);
-  char dada_utc[64];
-  strftime (dada_utc, 64, DADA_TIMESTR, utc_time);
-  printf("UTC START: %s\n",dada_utc);
-  dadacheck (ascii_header_set (ascii_hdr, "UTC_START", "%s", dada_utc) );
-  printf("%s",ascii_hdr);
-  ipcbuf_mark_filled (hdu->header_block, 4096);
+    // write psrdada output header values
+    char* ascii_hdr = ipcbuf_get_next_write (hdu->header_block);
+    dadacheck (ascii_header_set (ascii_hdr, "NAME", "%s", "B0833-45" ) );
+    dadacheck (ascii_header_set (ascii_hdr, "NCHAN", "%d", 1) );
+    dadacheck (ascii_header_set (ascii_hdr, "BANDWIDTH", "%lf", 64) );
+    dadacheck (ascii_header_set (ascii_hdr, "CFREQ", "%lf", 352) );
+    dadacheck (ascii_header_set (ascii_hdr, "NPOL", "%d", 2) );
+    dadacheck (ascii_header_set (ascii_hdr, "NBIT", "%d", 8) );
+    dadacheck (ascii_header_set (ascii_hdr, "RA", "%lf", 0.87180) );
+    dadacheck (ascii_header_set (ascii_hdr, "DEC", "%lf", 0.72452) );
+    // NB psrdada format has TSAMP in microseconds
+    //dadacheck (ascii_header_set (ascii_hdr, "TSAMP", "%lf", tsamp*1e6) );
+    // set up epoch appropriately -- first, make a tm struct for VDIF epoch
+    struct tm tm_epoch = {0};
+    int vdif_epoch = getVDIFEpoch (hdr);
+    tm_epoch.tm_year = 100 + vdif_epoch/2;
+    tm_epoch.tm_mon = 6*(vdif_epoch%2);
+    time_t epoch_seconds = mktime (&tm_epoch) + getVDIFFrameEpochSecOffset (hdr);
+    struct tm* utc_time = gmtime (&epoch_seconds);
+    char dada_utc[64];
+    strftime (dada_utc, 64, DADA_TIMESTR, utc_time);
+    printf("UTC START: %s\n",dada_utc);
+    dadacheck (ascii_header_set (ascii_hdr, "UTC_START", "%s", dada_utc) );
+    printf("%s",ascii_hdr);
+    ipcbuf_mark_filled (hdu->header_block, 4096);
+  }
 
   double sec_to_sim = tobs;
   size_t end_sample = size_t(sec_to_sim/tsamp);
@@ -325,11 +365,13 @@ int main(int argc, char *argv[])
 
       // set pulse profile
       set_profile<<<32*nsms, NTHREAD>>> (
-          fdat_dev+n_dm_samp, current_sample, period, 1.+ampls[ipol], new_samps);
+          fdat_dev+n_dm_samp, current_sample, period,
+          1.+ampls[ipol], new_samps);
       cudacheck ( cudaGetLastError() );
 
       // copy input for next overlap to overlap buffer
-      cudacheck (cudaMemcpy (fovl_dev_pols[ipol], fdat_dev+buflen-n_dm_samp, 
+      cudacheck (cudaMemcpy (
+            fovl_dev_pols[ipol], fdat_dev+buflen-n_dm_samp, 
           n_dm_samp*sizeof(cufftReal), cudaMemcpyDeviceToDevice) );
 
       // forward transform the input
@@ -365,8 +407,10 @@ int main(int argc, char *argv[])
 
       if (do_add_rfi)
       {
+        // this sample offset means that RFI "phase" is referenced to the
+        // very first sample written out; makes analysis easier
         add_rfi <<<32, NTHREAD>>> (fdat_dev, buflen, d_state, 
-            current_sample, tsamp*1e6);
+            current_sample-n_dm_samp-n_dm_samp_lo, tsamp*1e6);
         cudacheck ( cudaGetLastError() );
       }
 
@@ -377,39 +421,60 @@ int main(int argc, char *argv[])
 
       // copy to host
       cudacheck (cudaMemcpy (udat_host_pols[ipol] + vdif_offset, udat_dev, new_samps, cudaMemcpyDeviceToHost) );
-    }
+    } // end loop over polarizations
 
     current_sample += new_samps;
 
-    // write to psrdada buffer
+    // write to psrdada buffer or file
     size_t nframes = (new_samps + vdif_offset)/VD_DAT;
-    //printf("Will write out %d frames.\n",nframes);
-    for (size_t iframe = 0; iframe < nframes; ++iframe)
+
+    if (write_to_dada)
     {
-      // update VDIF header
-      if (current_frame == VLITE_FRAME_RATE)
+      for (size_t iframe = 0; iframe < nframes; ++iframe)
       {
-        frame_seconds ++;
-        setVDIFFrameSecond (hdr, getVDIFFrameSecond (hdr) + 1);
-        current_frame = 0;
+        // update VDIF header
+        if (current_frame == VLITE_FRAME_RATE)
+        {
+          frame_seconds ++;
+          setVDIFFrameSecond (hdr, getVDIFFrameSecond (hdr) + 1);
+          current_frame = 0;
+        }
+        setVDIFFrameNumber (hdr, current_frame);
+        for (int ipol = 0; ipol < 2; ++ipol)
+        {
+          setVDIFThreadID(hdr, ipol);
+          ipcio_write (hdu->data_block,hdr_buff,32);
+          ipcio_write (hdu->data_block,(char*)(udat_host_pols[ipol] + VD_DAT*iframe), VD_DAT);
+        }
+        current_frame++;
       }
-      setVDIFFrameNumber (hdr, current_frame);
-      for (int ipol = 0; ipol < 2; ++ipol)
+    }
+    else
+    {
+      for (size_t iframe = 0; iframe < nframes; ++iframe)
       {
-        setVDIFThreadID(hdr, ipol);
-#if WRITE_DADA
-        ipcio_write (hdu->data_block,hdr_buff,32);
-        ipcio_write (hdu->data_block,(char*)(udat_host_pols[ipol] + VD_DAT*iframe), VD_DAT);
-#else
-        fwrite(hdr_buff,1,32,output_fp);
-        fwrite(udat_host_pols[ipol]+VD_DAT*iframe,1,VD_DAT,output_fp);
-#endif
+        // update VDIF header
+        if (current_frame == VLITE_FRAME_RATE)
+        {
+          frame_seconds ++;
+          setVDIFFrameSecond (hdr, getVDIFFrameSecond (hdr) + 1);
+          current_frame = 0;
+        }
+        setVDIFFrameNumber (hdr, current_frame);
+        for (int ipol = 0; ipol < 2; ++ipol)
+        {
+          setVDIFThreadID(hdr, ipol);
+          fwrite(hdr_buff,1,32,output_fp);
+          fwrite(udat_host_pols[ipol]+VD_DAT*iframe,1,VD_DAT,output_fp);
+        }
+        current_frame++;
       }
-      current_frame++;
     }
 
     // copy remainder to beginning of buffer for next time
+    // NB this is always a number <5032 samples, i.e. one frame
     // TODO -- figure this out and what to do RE polarization
+    // MTK -- obviously I don't now know what the above TODO means
     size_t tocopy = new_samps + vdif_offset - nframes*VD_DAT;
     if (tocopy > 0)
     {
@@ -418,15 +483,14 @@ int main(int argc, char *argv[])
       vdif_offset = tocopy;
     }
    
-  }
-  //printf("Advanced the frame second by %d.\n",frame_seconds);
+  } // end loop over samples
 
-#if WRITE_DADA
-  dada_hdu_unlock_write (hdu);
-#else
-  fclose (output_fp);
-#endif
-  }
+  if (hdu)
+    dada_hdu_unlock_write (hdu);
+  if (output_fp)
+    fclose (output_fp);
+
+  } // end loop over observations
 
   // this cleanup a bit trivial at end of program
   curandDestroyGenerator (gen);
@@ -461,6 +525,15 @@ __global__ void init_dm_kernel(cufftComplex *ker, float dm, size_t n)
     sincos(arg, &rsin, &rcos);
     ker[i].x = rcos/(2*(n-1));
     ker[i].y = rsin/(2*(n-1));
+
+    // make a slightly more realistic bandpass; this has a relatively fast,
+    // asymmetric taper on each side as well as a modest ramp
+    freq *= 1./64;
+    double scale = 1-exp(-(freq*freq)/(0.05*0.05));
+    scale -= exp(-((1-freq)*(1-freq))/(0.10*0.10));
+    scale *= (1+0.20*freq);
+    ker[i].x *= scale;
+    ker[i].y *= scale;
   }
 }
 
@@ -575,7 +648,7 @@ __global__ void setup_dstate(curandState *state)
 {
 
   int idx = threadIdx.x+blockDim.x*blockIdx.x;
-  curand_init(idx, 0, 0, &state[idx]);
+  curand_init(idx+1233456, 0, 0, &state[idx]);
 }
 
 // Add roughly 1 mus of RFI every 10 mus of data.
@@ -588,11 +661,11 @@ __global__ void add_rfi(cufftReal* dat, size_t n, curandState *d_state, size_t c
       i += blockDim.x*gridDim.x)
   {
 
-    float phase = fmodf((i+current_sample) * (tsamp_in_mus/123456),1);
+    float phase = fmodf((i+current_sample) * (tsamp_in_mus/11.3),1);
     if (phase < 0.1)
     {
-      // Quick and dirty, add an alternating uniform signal
-      dat[i] += 3.*(curand_uniform (state) - 0.5);
+      // Quick and dirty, add a random uniform signal
+      dat[i] += 5.*(curand_uniform (state) - 0.5);
     }
   }
 }

@@ -1041,7 +1041,8 @@ int main (int argc, char *argv[])
       last_sample[i] = -1;
     }
 
-    // do dispatch -- break into chunks to fit in GPU memory
+    // do dispatch -- break into chunks to fit in GPU memory; this is
+    // currently 100 milliseconds
     for (int iseg = 0; iseg < SEG_PER_SEC; iseg++)
     {
 
@@ -1120,9 +1121,18 @@ int main (int argc, char *argv[])
         // (1) NB that fft_in_kur==fft_in if not writing both streams
         // (2) original implementation had a block for each pol; keeping
         //     that, but two blocks now access the same Dagostino entry
-        apply_kurtosis <<<nkurto_per_chunk, 256>>> (
-            fft_in,fft_in_kur,dag_dev,dag_fb_dev,kur_weights_dev);
-        cudacheck (cudaGetLastError () );
+        if (integrated >= 0.1)
+        {
+          apply_kurtosis <<<nkurto_per_chunk, 256>>> (
+              fft_in,fft_in_kur,dag_dev,dag_fb_dev,kur_weights_dev);
+          cudacheck (cudaGetLastError () );
+        }
+        else
+        {
+          apply_kurtosis_fake <<<nkurto_per_chunk, 256>>> (
+              fft_in,fft_in_kur,dag_dev,dag_fb_dev,kur_weights_dev);
+          cudacheck (cudaGetLastError () );
+        }
 
         #if WRITE_KURTO
         cudacheck (cudaMemcpy (
@@ -1798,7 +1808,8 @@ __global__ void apply_kurtosis (
   // over the two polarizations, but is duplicated, so just use the
   // entry in the second polarization; will also make it easier if
   // we revert to independent polarizations
-  bool bad =  (dag[blockIdx.x] > DAG_THRESH) || (dag_fb[blockIdx.x/(NFFT/NKURTO)] > DAG_FB_THRESH);
+  //bool bad =  (dag[blockIdx.x] > DAG_THRESH) || (dag_fb[blockIdx.x/(NFFT/NKURTO)] > DAG_FB_THRESH);
+  bool bad =  (dag[blockIdx.x] > DAG_THRESH);
 
   #ifdef DEBUG_WEIGHTS
   // if debugging, set the weights to 0 for the second half of all samples in
@@ -1836,6 +1847,29 @@ __global__ void apply_kurtosis (
     {
       atomicAdd (norms + (blockIdx.x*NKURTO)/NFFT, float(NKURTO)/NFFT);
     }
+  }
+}
+
+__global__ void apply_kurtosis_fake (
+    cufftReal *in, cufftReal *out, 
+    cufftReal *dag, cufftReal *dag_fb,
+    cufftReal* norms)
+{
+
+  unsigned int tid = threadIdx.x;
+
+  if (in != out && tid < 250)
+  {
+    size_t offset = blockIdx.x*NKURTO;
+    out[offset + tid] = in[offset + tid];
+    if (NKURTO==500)
+      out[offset + tid + 250] = in[offset + tid + 250];
+  }
+
+  // add one to the filterbank block samples for weights
+  if (tid==0)
+  {
+    atomicAdd (norms + (blockIdx.x*NKURTO)/NFFT, float(NKURTO)/NFFT);
   }
 }
 

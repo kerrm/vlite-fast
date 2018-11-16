@@ -61,6 +61,7 @@ __global__ void compute_dagostino (cufftReal *, cufftReal* ,size_t);
 __global__ void compute_dagostino2 (cufftReal *, cufftReal* ,size_t);
 __global__ void block_kurtosis (cufftReal*, cufftReal*, cufftReal*, cufftReal*, cufftReal*);
 __global__ void apply_kurtosis (cufftReal *, cufftReal *, cufftReal *, cufftReal*, cufftReal*);
+__global__ void apply_kurtosis_fake (cufftReal *, cufftReal *, cufftReal *, cufftReal*, cufftReal*);
 //__global__ void detect_and_normalize (cufftComplex *, size_t);
 __global__ void detect_and_normalize2 (cufftComplex *, cufftReal*, float, size_t);
 __global__ void detect_and_normalize3 (cufftComplex *, cufftReal*, cufftReal*, float, size_t);

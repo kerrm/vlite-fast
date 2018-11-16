@@ -25,7 +25,7 @@
 #define MAXFRAMENUM 25599
 
 #define EVENTDIR "/mnt/ssd/dumps"
-#define LOGDIR "/home/vlite-master/mtk/logs"
-#define DATADIR "/home/vlite-master/mtk/data"
-#define OBSINFODIR "/home/vlite-master/mtk/logs/obsinfo-antprop"
+#define LOGDIR "/data/kerrm/test_vlite/logs"
+#define DATADIR "/data/kerrm/test_vlite/data"
+#define OBSINFODIR "/data/kerrm/test_vlite/logs/obsinfo-antprop"
 
