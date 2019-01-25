@@ -751,15 +751,28 @@ int main (int argc, char *argv[])
   strncpy (heimdall_file,RFI_MODE?fbfile_kur:fbfile,255);
 
   // check for write to /dev/null and udpate file names if necessary
-  int write_to_null =  0==write_fb;
+  int write_to_null = 0==write_fb;
   if (write_fb == 1) {
     char name[OBSERVATION_NAME_SIZE];
     ascii_header_get (incoming_hdr, "NAME", "%s", name);
     name[OBSERVATION_NAME_SIZE-1] = '\0';
-    if (check_name (name)) {
+    double ra = 0;
+    ascii_header_get (incoming_hdr, "RA", "%lf", &ra);
+    double dec = 0;
+    ascii_header_get (incoming_hdr, "DEC", "%lf", &dec);
+    if (check_coords (ra, dec) )
+    {
+      multilog (log, LOG_INFO,
+          "Source %s matches target coords, recording filterbank data.\n",
+          name);
+      send_email (name, hostname);
+    }
+    else if (check_name (name))
+    {
       multilog (log, LOG_INFO,
           "Source %s matches target list, recording filterbank data.\n",
           name);
+      send_email (name, hostname);
     }
     else {
       write_to_null = 1;

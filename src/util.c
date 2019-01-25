@@ -1,6 +1,8 @@
 #include "util.h"
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
+#include <time.h>
 
 void dadacheck (int rcode)
 {
@@ -97,9 +99,66 @@ int check_name (char* src)
           strstr (src, "B1642-03") != NULL ||
           strstr (src, "B1749-28") != NULL || 
           strstr (src, "B1929+10") != NULL || 
-          strstr (src, "3C147") != NULL || 
-          strstr (src, "3C48") != NULL || 
+          //strstr (src, "3C147") != NULL || 
+          //strstr (src, "3C48") != NULL || 
           strstr (src, "J0341+5711") != NULL ||
           strstr (src, "J1713+0747") != NULL ||
+          strstr (src, "R2") != NULL ||
+          //strstr (src, "3C345") != NULL ||
           strstr (src, "J1909-3744") != NULL);
+
+}
+
+double coord_dist (double ra1, double ra2, double de1, double de2)
+{
+  // NB everything is in radians!
+  double dde = (de2-de1);
+  double dra = (ra2-ra1)*cos(de1);
+  return sqrt (dde*dde + dra*dra);
+}
+
+int check_coords (double raj, double dej, double tol)
+{
+  // NB everything is in radians!
+  // positions of interest
+
+  // position 1 -- R2
+  if (coord_dist(1.14479055, raj, 1.28572588, dej) < tol)
+    return 1;
+
+  // position 2 -- XTE 1809-197
+  if (coord_dist(4.755373, raj, -0.344372, dej) < tol)
+    return 1;
+
+  return 0;
+}
+
+void send_email(char* src_name, char* host_name)
+{
+  // only send an email if executing on vlite-difx3; a better way to do this
+  // is obviously with a daemon running on vlite-nrl or something, but OK
+  if (strstr (host_name, "vlite-difx3") == NULL)
+    return;
+  static time_t t[4] = {0,0,0,0};
+  int idx = -1;
+  if (strstr (src_name, "R2") != NULL)
+    idx = 0;
+  else if (strstr (src_name, "3C147") != NULL)
+    idx = 1;
+  else if (strstr (src_name, "3C48") != NULL)
+    idx = 2;
+  //else if (strstr (src_name, "3C345") != NULL)
+  //  idx = 3;
+  if (idx < 0)
+    return;
+  time_t new_time;
+  time (&new_time);
+  if ((new_time - t[idx]) > 3600)
+  {
+    // send email
+    t[idx] = new_time;
+    char cmd[256];
+    snprintf (cmd,255,"echo '' | mail -s 'Source %s now being observed.' matthew.kerr@gmail.com,shining.surya.d8@gmail.com",src_name);
+    system (cmd);
+  }
 }

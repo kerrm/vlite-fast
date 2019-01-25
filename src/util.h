@@ -12,3 +12,6 @@ void send_int (const char *name, int integer, FILE *output);
 void send_long (const char *name, long integer, FILE *output);
 void send_string (const char *string, FILE *output);
 int check_name (char*);
+double coord_dist (double ra1, double ra2, double de1, double de2);
+int check_coords (double raj, double dej, double tol=0.01);
+void send_email(char* src_name, char* host_name);
