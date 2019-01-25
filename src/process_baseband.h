@@ -25,6 +25,7 @@ cudaEventElapsedTime (Z,X,Y);}
 //#define NSCRUNCH 5 // time scrunch factor
 #define SEG_PER_SEC 10 // break each second of data up into chunks
 //#define SEG_PER_SEC 5 // break each second of data up into chunks
+#define FFTS_PER_SEG VLITE_RATE/SEG_PER_SEC/NFFT // filterbanks for a single pol
 
 // write to multiple output buffers so we don't have to block on a
 // completed observation; switch between them in ring fashion
@@ -61,7 +62,11 @@ __global__ void compute_dagostino (cufftReal *, cufftReal* ,size_t);
 __global__ void compute_dagostino2 (cufftReal *, cufftReal* ,size_t);
 __global__ void block_kurtosis (cufftReal*, cufftReal*, cufftReal*, cufftReal*, cufftReal*);
 __global__ void apply_kurtosis (cufftReal *, cufftReal *, cufftReal *, cufftReal*, cufftReal*);
+__global__ void apply_kurtosis_fake (cufftReal *, cufftReal *, cufftReal *, cufftReal*, cufftReal*);
 //__global__ void detect_and_normalize (cufftComplex *, size_t);
+//
+__global__ void set_frb_delays (float*, float);
+__global__ void inject_frb ( cufftComplex *, float* , int , float , float );
 __global__ void detect_and_normalize2 (cufftComplex *, cufftReal*, float, size_t);
 __global__ void detect_and_normalize3 (cufftComplex *, cufftReal*, cufftReal*, float, size_t);
 __global__ void histogram ( unsigned char *, unsigned int*, size_t);

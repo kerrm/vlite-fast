@@ -241,13 +241,15 @@ int main (int argc, char *argv[])
   int stdout_output = 0;
   int write_fb = 2;
   int npol = 1;
+  int do_inject_frb = 0;
   int RFI_MODE=2;
   int major_skip = 0;
+  int profile_pass = 0;  
   int single_pass = 0;  
   int gpu_id = 0;
 
   int arg = 0;
-  while ((arg = getopt(argc, argv, "hk:K:p:omw:b:P:r:sg:")) != -1) {
+  while ((arg = getopt(argc, argv, "hik:K:p:omw:b:P:r:stg:")) != -1) {
 
     switch (arg) {
 
@@ -278,6 +280,10 @@ int main (int argc, char *argv[])
 
     case 'o':
       stdout_output = 1;
+      break;
+
+    case 'i':
+      do_inject_frb = 1;
       break;
 
     /*
@@ -329,6 +335,10 @@ int main (int argc, char *argv[])
 
     case 's':
       single_pass = 1;
+      break;
+
+    case 't':
+      profile_pass = 1;
       break;
 
     case 'g':
@@ -460,8 +470,8 @@ int main (int argc, char *argv[])
 
   // voltage samples in a chunk, 2*VLITE_RATE/SEG_PER_SEC (both pols)
   size_t samps_per_chunk = 2*VLITE_RATE/SEG_PER_SEC;
-  // FFTs per processing chunk
-  int fft_per_chunk = samps_per_chunk / NFFT;
+  // FFTs per processing chunk (2 per pol)
+  int fft_per_chunk = 2*FFTS_PER_SEG;
 
   cufftHandle plan;
   cufftcheck (cufftPlan1d (&plan,NFFT,CUFFT_R2C,fft_per_chunk));
@@ -566,6 +576,26 @@ int main (int argc, char *argv[])
     cudacheck (cudaMemset (bp_kur_dev, 0, sizeof(cufftReal)*NCHAN*2));
   }
 
+  // memory for FRB injection
+  float* frb_delays_dev = NULL;
+  if (do_inject_frb)
+  {
+    cudacheck (cudaMalloc ((void**)&frb_delays_dev, sizeof(float)*NCHAN));
+    // DM of 80 fits almost exactly in 1s of data across the whole band
+    set_frb_delays <<< NCHAN/NTHREAD+1, NTHREAD >>> (frb_delays_dev, 80);
+
+    /*
+    float* frb_delays_hst = NULL;
+    cudacheck (cudaMallocHost ((void**)&frb_delays_hst, sizeof(float)*NCHAN));
+    cudacheck (cudaMemcpy (
+          frb_delays_hst,frb_delays_dev,sizeof(float)*NCHAN,
+          cudaMemcpyDeviceToHost) );
+    for (int ichan=0; ichan < 6250; ichan += 100)
+      fprintf (stdout, "frb_delay %d = %.6f\n", ichan, frb_delays_hst[ichan]);
+      */
+  }
+
+
   #if PROFILE
   CUDA_PROFILE_STOP(start,stop,&alloc_time)
   #endif
@@ -595,9 +625,10 @@ int main (int argc, char *argv[])
   char cmd_buff[32];
 
   int quit = 0;
+  int inject_frb_now = 0;
 
   // TEMP for profiling
-  if (single_pass)
+  if (profile_pass)
   {
     char cmd[256];
     snprintf (cmd, 255, "/home/vlite-master/mtk/src/readbase /home/vlite-master/mtk/baseband/20150302_151845_B0329+54_ev_0005.out.uw"); 
@@ -989,6 +1020,12 @@ int main (int argc, char *argv[])
     // keep log on disk up to date
     fflush (logfile_fp);
 
+    // check for FRB injection conditions
+    inject_frb_now = do_inject_frb && (current_sec%10==0);
+    if (inject_frb_now)
+      multilog (log, LOG_INFO,
+        "Injecting an FRB with integrated = %.2f!!!.\n", integrated);
+
     // if we have accumulated at least 10s of data, then launch heimdall
     // (heimdall will hang on very short runs, not sure why, so make sure
     // we never launch it without a reasonable amount of data
@@ -1024,8 +1061,7 @@ int main (int argc, char *argv[])
       char heimdall_cmd[256];
       // NB need to redirect stderr or else we can't catch it
       // TODO -- consider adding zap chans to bottom of band?
-      snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 45000 -gpu_id %d -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -zap_chans 3900 4096 -beam %d -k %x -coincidencer vlite-nrl:27555", gpu_id, station_id, key_out + active_buffer*2); 
-      //snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 45000 -gpu_id 0 -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -beam %d -k %x", station_id, key_out + active_buffer*2); 
+      snprintf (heimdall_cmd, 255, "heimdall -nsamps_gulp 45000 -gpu_id %d -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -zap_chans 3900 4096 -beam %d -k %x -coincidencer vlite-nrl:27555 -V", gpu_id, station_id, key_out + active_buffer*2); 
       multilog (log, LOG_INFO, "%s\n", heimdall_cmd);
       heimdall_fp[active_buffer] = popen (heimdall_cmd, "r");
       heimdall_launched = true;
@@ -1054,7 +1090,8 @@ int main (int argc, char *argv[])
       last_sample[i] = -1;
     }
 
-    // do dispatch -- break into chunks to fit in GPU memory
+    // do dispatch -- break into chunks to fit in GPU memory; this is
+    // currently 100 milliseconds
     for (int iseg = 0; iseg < SEG_PER_SEC; iseg++)
     {
 
@@ -1133,9 +1170,18 @@ int main (int argc, char *argv[])
         // (1) NB that fft_in_kur==fft_in if not writing both streams
         // (2) original implementation had a block for each pol; keeping
         //     that, but two blocks now access the same Dagostino entry
-        apply_kurtosis <<<nkurto_per_chunk, 256>>> (
-            fft_in,fft_in_kur,dag_dev,dag_fb_dev,kur_weights_dev);
-        cudacheck (cudaGetLastError () );
+        if (integrated >= 0.1)
+        {
+          apply_kurtosis <<<nkurto_per_chunk, 256>>> (
+              fft_in,fft_in_kur,dag_dev,dag_fb_dev,kur_weights_dev);
+          cudacheck (cudaGetLastError () );
+        }
+        else
+        {
+          apply_kurtosis_fake <<<nkurto_per_chunk, 256>>> (
+              fft_in,fft_in_kur,dag_dev,dag_fb_dev,kur_weights_dev);
+          cudacheck (cudaGetLastError () );
+        }
 
         #if WRITE_KURTO
         cudacheck (cudaMemcpy (
@@ -1160,6 +1206,24 @@ int main (int argc, char *argv[])
       CUDA_PROFILE_STOP(start,stop,&elapsed)
       fft_time += elapsed;
       #endif
+
+      ////// INJECT FRB AS REQUESTED //////
+      if (inject_frb_now)
+      {
+        float frb_width = 2e-2*SEG_PER_SEC*FFTS_PER_SEG; //2ms
+        float frb_amp = 1.025; // gives a single-antenna S/N of about 50
+        int nfft_since_frb = (inject_frb_now-1)*FFTS_PER_SEG;
+        inject_frb <<< NCHAN/NTHREAD+1,NTHREAD >>> (fft_out, 
+            frb_delays_dev, nfft_since_frb, frb_width, frb_amp);
+        cudacheck ( cudaGetLastError () );
+        if (RFI_MODE > 1)
+        {
+          inject_frb <<< NCHAN/NTHREAD+1,NTHREAD >>> (fft_out_kur, 
+              frb_delays_dev, nfft_since_frb,frb_width, frb_amp);
+          cudacheck ( cudaGetLastError () );
+        }
+        inject_frb_now += 1;
+      }
 
       ////// NORMALIZE BANDPASS //////
       #if PROFILE
@@ -1485,7 +1549,7 @@ int main (int argc, char *argv[])
 
   #endif
 
-  if (single_pass)
+  if (profile_pass || single_pass)
     break;
 
   } // end loop over observations
@@ -1811,7 +1875,8 @@ __global__ void apply_kurtosis (
   // over the two polarizations, but is duplicated, so just use the
   // entry in the second polarization; will also make it easier if
   // we revert to independent polarizations
-  bool bad =  (dag[blockIdx.x] > DAG_THRESH) || (dag_fb[blockIdx.x/(NFFT/NKURTO)] > DAG_FB_THRESH);
+  //bool bad =  (dag[blockIdx.x] > DAG_THRESH) || (dag_fb[blockIdx.x/(NFFT/NKURTO)] > DAG_FB_THRESH);
+  bool bad =  (dag[blockIdx.x] > DAG_THRESH);
 
   #ifdef DEBUG_WEIGHTS
   // if debugging, set the weights to 0 for the second half of all samples in
@@ -1852,6 +1917,29 @@ __global__ void apply_kurtosis (
   }
 }
 
+__global__ void apply_kurtosis_fake (
+    cufftReal *in, cufftReal *out, 
+    cufftReal *dag, cufftReal *dag_fb,
+    cufftReal* norms)
+{
+
+  unsigned int tid = threadIdx.x;
+
+  if (in != out && tid < 250)
+  {
+    size_t offset = blockIdx.x*NKURTO;
+    out[offset + tid] = in[offset + tid];
+    if (NKURTO==500)
+      out[offset + tid + 250] = in[offset + tid + 250];
+  }
+
+  // add one to the filterbank block samples for weights
+  if (tid==0)
+  {
+    atomicAdd (norms + (blockIdx.x*NKURTO)/NFFT, float(NKURTO)/NFFT);
+  }
+}
+
 
 __global__ void histogram ( unsigned char *utime, unsigned int* histo, size_t n)
 {
@@ -1868,6 +1956,55 @@ __global__ void histogram ( unsigned char *utime, unsigned int* histo, size_t n)
 
   // MUST run with 512 threads for this global accumulation to work
   atomicAdd ( histo+threadIdx.x, lhisto[threadIdx.x]);
+}
+
+__global__ void set_frb_delays (float* frb_delays, float dm)
+{
+  int i = threadIdx.x + blockIdx.x*blockDim.x; 
+  if (i > NCHAN) return;
+  double freq = 0.384 - (i*0.064)/NCHAN;
+  // delays are scaled by FFT timestep
+  double scale = 4.15e-3*dm*SEG_PER_SEC*FFTS_PER_SEG;
+  frb_delays[i] = scale/(freq*freq)-scale/(0.384*0.384);
+}
+
+__global__ void inject_frb ( cufftComplex *fft_out, float* frb_delays,
+     int nfft_since_frb, float frb_width, float frb_amp)
+{
+  // NB frb_width must be in FFT time steps!
+
+  // this is the channel; each thread does one channel for all time steps
+  int i = threadIdx.x + blockIdx.x*blockDim.x; 
+  
+  // for now, don't try to do any interpolation, just round to the nearest
+  // time index that the FRB encounters this channel
+  int time_idx_lo = int(frb_delays[i]+0.5)-nfft_since_frb;
+
+  // if the lowest time isn't in this chunk, return
+  if (time_idx_lo >= FFTS_PER_SEG) return;
+
+  int time_idx_hi = int(frb_delays[i]+frb_width+0.5)-nfft_since_frb;
+
+  // if the latest time precedes this chunk, return
+  if (time_idx_hi < 0) return;
+
+  // otherwise, there is a portion of the FRB in this chunk, so loop over
+  // the time steps that it passes through channel i
+  for (int time_idx=time_idx_lo; time_idx<= time_idx_hi; time_idx++)
+  {
+    fft_out[time_idx*NCHAN+i].x *= frb_amp;
+    fft_out[time_idx*NCHAN+i].y *= frb_amp;
+  }
+
+  // do the next polarization
+  fft_out += FFTS_PER_SEG*NCHAN;
+
+  for (int time_idx=time_idx_lo; time_idx<= time_idx_hi; time_idx++)
+  {
+    fft_out[time_idx*NCHAN+i].x *= frb_amp;
+    fft_out[time_idx*NCHAN+i].y *= frb_amp;
+  }
+
 }
 
 __global__ void detect_and_normalize2 (cufftComplex *fft_out, cufftReal* bp, 
