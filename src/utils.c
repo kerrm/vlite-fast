@@ -102,13 +102,20 @@ int serve (int port, Connection* c) {
  */
 int wait_for_cmd (Connection* c, FILE* outstream) {
 
+  return basic_wait_for_cmd (c->rqst, c->buf, MAXINBUFSIZE, outstream);
+
+}
+
+
+int basic_wait_for_cmd (int socket, char* buf, int maxlen, FILE* outstream) {
+
   if (NULL == outstream) outstream = stderr;
 
   fprintf (outstream, "in wait_for_cmd\n");
 
-  int nbytes = read(c->rqst,c->buf,MAXINBUFSIZE);
-  c->buf[nbytes] = '\0';
-  fprintf (outstream, "wait_for_cmd: read %d bytes: %.*s\n",nbytes,nbytes,c->buf);
+  int nbytes = read (socket,buf,maxlen);
+  buf[nbytes] = '\0';
+  fprintf (outstream, "wait_for_cmd: read %d bytes: %.*s\n",nbytes,nbytes,buf);
   
   if(nbytes == 0) {
     fprintf (outstream,
@@ -121,15 +128,15 @@ int wait_for_cmd (Connection* c, FILE* outstream) {
   // MTK -- I assume note above is from telnet; direct commands sent over
   // socket will have fewer, so changed == to <=.
   if(nbytes <= 3) {
-      fprintf (outstream, "wait_for_cmd: Triggered with %c.\n",c->buf[0]);
-    switch(c->buf[0]) {
+      fprintf (outstream, "wait_for_cmd: Triggered with %c.\n",buf[0]);
+    switch(buf[0]) {
     case CMD_START: return CMD_START;
     case CMD_STOP: return CMD_STOP;
     case CMD_QUIT: return CMD_QUIT;
     case CMD_EVENT: return CMD_EVENT;
     default: {
       fprintf (outstream, 
-          "wait_for_cmd: Unrecognized command %c, defaulting to CMD_NONE.\n",c->buf[0]);
+          "wait_for_cmd: Unrecognized command %c, defaulting to CMD_NONE.\n",buf[0]);
       return CMD_NONE;
     }
     }
@@ -137,7 +144,7 @@ int wait_for_cmd (Connection* c, FILE* outstream) {
   //Backlogged commands: return the most recent non-event command.
   else {
     for(int ii=nbytes-1; ii>=0; ii--) {
-      switch(c->buf[ii]) {
+      switch(buf[ii]) {
       case CMD_START: return CMD_START;
       case CMD_STOP: return CMD_STOP;
       case CMD_QUIT: return CMD_QUIT;
@@ -145,7 +152,7 @@ int wait_for_cmd (Connection* c, FILE* outstream) {
 	//case '\0': continue;
       default: {
 	fprintf (outstream, 
-      "wait_for_cmd: Unrecognized command %c, defaulting to CMD_NONE.\n",c->buf[ii]);
+      "wait_for_cmd: Unrecognized command %c, defaulting to CMD_NONE.\n",buf[ii]);
 	return CMD_NONE;
       }
       }
@@ -453,6 +460,7 @@ time_t vdif_to_unixepoch (vdif_header* vdhdr)
 
 int dump_check_name (char* src, char* did)
 {
+  return 0;
   static int cnt_3C147 = 0;
   static int cnt_3C48 = 0;
   //static int cnt_3C273 = 0;
@@ -487,6 +495,7 @@ int dump_check_name (char* src, char* did)
 
 int voltage_check_name (char* src, char* did)
 {
+  return 0;
   return (strstr (src, "B0329+54") != NULL ||
           strstr (src, "J0332+54") != NULL || 
           strstr (src, "3C147") != NULL || 

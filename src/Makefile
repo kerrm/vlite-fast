@@ -22,7 +22,7 @@ install:
 	cp -p writer ${PACKAGE_DIR}/bin
 
 process_baseband: process_baseband.o util.o cuda_util.o utils.o
-	$(NVCC) -o $@ $@.o utils.o util.o cuda_util.o -lcufft -lcurand -L${PACKAGE_DIR}/lib -lvdifio -lpsrdada
+	$(NVCC) -o $@ $@.o utils.o util.o cuda_util.o multicast.o -lcufft -lcurand -L${PACKAGE_DIR}/lib -lvdifio -lpsrdada
 	chmod a+rx $@
 
 process_baseband.o: process_baseband.cu process_baseband.h def.h
@@ -45,7 +45,7 @@ messenger:	messenger.c def.h utils.o $(PARSE_FILES)
 
 writer:	writer.c def.h utils.o
 	gcc -g -O2 -Wall -std=gnu99 -pthread -c writer.c -I${PACKAGE_DIR}/include -I$(INCDIFXMESSAGE)
-	gcc -o $@ writer.o utils.o -pthread -L${PACKAGE_DIR}/lib -lpsrdada -lvdifio
+	gcc -o $@ writer.o utils.o multicast.o -pthread -L${PACKAGE_DIR}/lib -lpsrdada -lvdifio
 	chmod a+rx $@
 
 util.o: util.h util.c

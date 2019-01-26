@@ -30,6 +30,10 @@ char obsinfogrp[] = "239.192.3.2";
 char antpropgrp[] = "239.192.3.1";
 char alertgrp[] = "239.192.2.3";
 
+int mc_reader_port = 20000;
+int mc_writer_port = 20001;
+int mc_info_port = 20002;
+
 // for signal handling and graceful termination
 static volatile int keep_running = 1;
 static volatile int signal_received = 0;
@@ -72,6 +76,15 @@ void fill_dummy_obs_doc (ObservationDocument* od)
   */
 }
 
+// just a version with built in error logging
+void mc_send(const char *group, int port, const char *message,
+    int length, multilog_t* log)
+{
+  if (MulticastSend (group, port, message, length) < 0)
+    multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
+}
+    
+
 int main(int argc, char** argv)
 {
   // register SIGINT handling
@@ -104,7 +117,7 @@ int main(int argc, char** argv)
       stdout_output = 1;
       break;
 
-    } // end switch 
+    } // end switch statement
   } // end argument parsing
 
   // check for mandatory configuration file
@@ -147,10 +160,6 @@ int main(int argc, char** argv)
   const char cmdquit[] = {CMD_QUIT};
   const char cmdstart[] = {CMD_START};
 
-  Connection cr[nvconf];
-  Connection cw[nvconf];
-  Connection ci[nvconf];
-  //char hostname[MAXHOSTNAME]; // = "vlite-difx1.evla.nrao.edu";
   fd_set readfds;
   int obsinfosock, antpropsock, alertsock, maxnsock = 0;
   //int ant_on_src = 0;
@@ -178,53 +187,6 @@ int main(int argc, char** argv)
 
   FILE *sfd;//, *efd;
 
-  //Initialize Connections and connect to Readers/Writers: two pairs per difx host
-  for (int ii=0; ii < nvconf; ++ii) {
-    cr[ii].port = vconf[ii]->reader_port;
-    cw[ii].port = vconf[ii]->writer_port;
-    ci[ii].port = vconf[ii]->info_port;
-    strcpy (cr[ii].hostname, vconf[ii]->hostname);
-    strcpy (cw[ii].hostname, vconf[ii]->hostname);
-    strcpy (ci[ii].hostname, vconf[ii]->hostname);
-    cr[ii].isconnected = 0;
-    cw[ii].isconnected = 0;
-    ci[ii].isconnected = 0;
-
-    multilog (log, LOG_INFO, "Reader control on %s, port %d\n",
-        cr[ii].hostname, cr[ii].port);
-    multilog (log, LOG_INFO, "Writer control on %s, port %d\n",
-        cw[ii].hostname, cw[ii].port);
-    multilog (log, LOG_INFO, "Writer info on %s, port %d\n",
-        ci[ii].hostname, ci[ii].port);
-
-    if (conn (&cw[ii]) < 0) {
-      multilog (log, LOG_ERR,"Could not connect to Writer Control on %s port %d\n",
-          cw[ii].hostname, cw[ii].port);
-      exit (EXIT_FAILURE); // TODO -- cleaner shutdown?
-    }
-    else
-      cw[ii].isconnected = 1;
-
-    // wait 100 ms for connection to happen and writer to begin listening on next port
-    nanosleep (&ts_100ms,NULL);
-
-    if (conn (&ci[ii]) < 0) {
-      multilog (log, LOG_ERR,"Could not connect to Writer Info on %s port %d\n",
-          ci[ii].hostname, ci[ii].port);
-      exit (EXIT_FAILURE); // TODO -- cleaner shutdown?
-    }
-    else
-      ci[ii].isconnected = 1;
-    
-    if (conn (&cr[ii]) < 0 ) {
-      multilog (log, LOG_ERR,"Could not connect to Reader Control on %s port %d\n",
-          cr[ii].hostname, cr[ii].port);
-      exit (EXIT_FAILURE); // TODO -- cleaner shutdown?
-    }
-    else
-      cr[ii].isconnected = 1;
-  }
-
   // create manual control socket
   Connection mc;
   if (manual_control_port > 0) {
@@ -237,6 +199,7 @@ int main(int argc, char** argv)
     if (mc.rqst > maxnsock)
       maxnsock = mc.rqst;
   }
+  //
 
   //connect to VLA obsinfo multicast
   obsinfosock = openMultiCastSocket (obsinfogrp, MULTI_OBSINFO_PORT);
@@ -347,12 +310,8 @@ int main(int argc, char** argv)
           if (strcasecmp (od->name,"FINISH") == 0)
           {
             multilog (log, LOG_INFO, "sending STOP command\n");
-            for (int ii=0; ii<nvconf; ++ii) {
-              if (send (cr[ii].svc, cmdstop, 1, 0) == -1)
-                multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
-              if (send (cw[ii].svc, cmdstop, 1, 0) == -1)
-                multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
-            }
+            mc_send ("224.3.29.71",mc_reader_port,cmdstop,1,log);
+            mc_send ("224.3.29.71",mc_writer_port,cmdstop,1,log);
             recording = 0;
             // TEMP -- see if this sleep is helpful
             nanosleep (&ts_500ms, NULL);
@@ -387,10 +346,7 @@ int main(int argc, char** argv)
               }
 
               multilog (log, LOG_INFO, "sending STOP command\n");
-              for(int ii=0; ii<nvconf; ++ii) {
-                if (send (cw[ii].svc, cmdstop, 1, 0) == -1)
-                  multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
-              }
+              mc_send ("224.3.29.71",mc_writer_port,cmdstop,1,log);
               // this is empirical, but seems to be long enough to allow
               // messages to propagate before sending the next command;
               // can also avoid this by altering wait_for_cmd to not discard
@@ -404,17 +360,9 @@ int main(int argc, char** argv)
             time (&start_integ);
             multilog (log, LOG_INFO,"sending START command\n");
 
-            for (int ii=0; ii<nvconf; ++ii) {
-              if (send (cr[ii].svc, cmdstart, 1, 0) == -1)
-                multilog (log, LOG_ERR,
-                    "send to reader %d: %s\n", ii+1, strerror (errno));
-              if (send (cw[ii].svc, cmdstart, 1, 0) == -1)
-                multilog (log, LOG_ERR,
-                    "send to writer %d: %s\n", ii+1, strerror (errno));
-              if (send (ci[ii].svc, od, sizeof(ObservationDocument), 0) == -1)
-                multilog (log, LOG_ERR,
-                    "send to info %d: %s\n", ii+1, strerror (errno));
-            }
+            mc_send ("224.3.29.71",mc_reader_port,cmdstart,1,log);
+            mc_send ("224.3.29.71",mc_writer_port,cmdstart,1,log);
+            mc_send ("224.3.29.71",mc_info_port,(char*)(od),sizeof(ObservationDocument),log);
             multilog (log, LOG_INFO,"sent START command\n");
             fflush (stderr); fflush (stdout);
             nanosleep (&ts_10ms, NULL);
@@ -486,34 +434,19 @@ int main(int argc, char** argv)
         ObservationDocument dummy;
         fill_dummy_obs_doc (&dummy);
         multilog (log, LOG_INFO, "sending manual START command\n");
-        for (int ii=0; ii<nvconf; ++ii) {
-          if (send(cr[ii].svc, cmdstart, 1, 0) == -1)
-            multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
-          if (send(cw[ii].svc, cmdstart, 1, 0) == -1)
-            multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
-          if (send(ci[ii].svc, &dummy, sizeof(ObservationDocument), 0) == -1)
-            multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
-        }
+        mc_send ("224.3.29.71",mc_reader_port,cmdstart,1,log);
+        mc_send ("224.3.29.71",mc_writer_port,cmdstart,1,log);
+        mc_send ("224.3.29.71",mc_info_port,(char *)(&dummy),sizeof(ObservationDocument),log);
       }
       else if (cmd == CMD_EVENT) {
         multilog (log, LOG_INFO, "sending manual EVENT command\n");
-        for (int ii=0; ii<nvconf; ++ii) {
-          // send STOP to reader
-          if (send(cr[ii].svc, cmdstop, 1, 0) == -1)
-            multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
-          // send EVENT to writer
-          if (send(cw[ii].svc, cmdevent, 1, 0) == -1)
-            multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
-        }
+        mc_send ("224.3.29.71",mc_reader_port,cmdstop,1,log);
+        mc_send ("224.3.29.71",mc_writer_port,cmdevent,1,log);
       }
       else if (cmd == CMD_STOP) {
         multilog (log, LOG_INFO, "sending STOP command\n");
-        for(int ii=0; ii<nvconf; ++ii) {
-          if (send(cr[ii].svc, cmdstop, 1, 0) == -1)
-            multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
-          if (send(cw[ii].svc, cmdstop, 1, 0) == -1)
-            multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
-        }
+        mc_send ("224.3.29.71",mc_reader_port,cmdstop,1,log);
+        mc_send ("224.3.29.71",mc_writer_port,cmdstop,1,log);
       }
       else if (cmd == CMD_QUIT) {
         multilog (log, LOG_INFO, "breaking from main loop\n");
@@ -531,16 +464,10 @@ int main(int argc, char** argv)
   fclose (logfile_fp);
 
   // shut down readers
-  for (int ii=0; ii<nvconf; ++ii) {
-    if (send(cr[ii].svc, cmdquit, 1, 0) == -1)
-      multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
-  }
+  mc_send ("224.3.29.71",mc_reader_port,cmdquit,1,log);
   // run writers for a little longer to avoid readers hanging
   sleep (2);
-  for (int ii=0; ii<nvconf; ++ii) {
-    if (send(cw[ii].svc, cmdquit, 1, 0) == -1)
-      multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
-  }
+  mc_send ("224.3.29.71",mc_writer_port,cmdquit,1,log);
 
   // clean up configuration memory
   for (int ii=0; ii < nvconf; ++ii)

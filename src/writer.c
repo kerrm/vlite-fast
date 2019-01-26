@@ -16,6 +16,7 @@
 #include "executor.h"
 #include "def.h"
 #include "vdifio.h"
+#include "multicast.h"
 
 static FILE* logfile_fp = NULL;
 
@@ -23,11 +24,9 @@ void usage ()
 {
   fprintf(stdout,"Usage: writer [options]\n"
 	  "-k hexadecimal shared memory key  (default: 40)\n"
-	  "-p listening port number (default: %"PRIu64")\n"
-	  "-i information port number (default: %"PRIu64")\n"
 	  "-e ethernet device id (default: eth0)\n"
 	  "-o print logging messages to stderr (as well as logfile)\n"
-	  ,(uint64_t)WRITER_SERVICE_PORT,(uint64_t)WRITER_INFO_PORT);
+    );
 }
 
 void sigint_handler (int dummy) {
@@ -149,14 +148,14 @@ int main(int argc, char** argv)
   //char *starthost = strstr(hostname, "difx");
   
   int state = STATE_STOPPED;
-  uint64_t port = WRITER_SERVICE_PORT;
-  uint64_t iport = WRITER_INFO_PORT;
+  //uint64_t port = WRITER_SERVICE_PORT;
+  //uint64_t iport = WRITER_INFO_PORT;
   char cmd = CMD_NONE;
   int arg, maxsock = 0; 
   int stderr_output = 0;
 
   
-  while ((arg = getopt(argc, argv, "hk:p:i:e:o")) != -1) {
+  while ((arg = getopt(argc, argv, "hk:e:o")) != -1) {
     switch(arg) {
 
     case 'h':
@@ -170,6 +169,7 @@ int main(int argc, char** argv)
       }
       break;
       
+   /*
     case 'p':
       if (sscanf (optarg, "%"PRIu64"", &port) != 1) {
         fprintf (stderr, "writer: could not parse port from %s\n", optarg);
@@ -183,6 +183,7 @@ int main(int argc, char** argv)
         return -1;
       }
       break;
+    */
     
     case 'e':
       if (sscanf (optarg, "%s", dev) != 1) {
@@ -207,16 +208,9 @@ int main(int argc, char** argv)
   tv_500mus.tv_sec = 1;
   tv_500mus.tv_usec = 0;
 
-  Connection c;
-  c.sockoptval = 1; //release port immediately after closing connection
-
   Connection raw;
   raw.alen = sizeof(raw.rem_addr);
   raw.sockoptval = 16*1024*1024; //size of data socket internal buffer
-
-  // TODO -- make this for passing source information
-  Connection ci;
-  ci.sockoptval = 1;
 
   // observation metadata
   ObservationDocument od;
@@ -263,13 +257,18 @@ int main(int argc, char** argv)
   }
   multilog (log, LOG_INFO, "Connected to psrdada HDU.\n");
 
-  //create listening socket 
-  if (serve (port, &c) < 0) {
-    multilog (log, LOG_ERR,
-      "Failed to create control socket on port %d.\n", port);
+  // set up multi-cast control socket
+  int mc_control_sock = 0;
+  char mc_control_buf[32];
+  mc_control_sock = openMultiCastSocket ("224.3.29.71", 20001);
+  if (mc_control_sock < 0) {
+    multilog (log, LOG_ERR, "Failed to open Observation multicast; openMultiCastSocket = %d\n",mc_control_sock);
     exit (EXIT_FAILURE);
   }
-  maxsock = c.rqst;
+  else
+    multilog (log, LOG_INFO, "Control socket: %d\n",mc_control_sock);
+  if (mc_control_sock > maxsock)
+    maxsock = mc_control_sock;
 
   //Open raw data stream socket
   raw.svc = openRawSocket (dev,0);
@@ -287,12 +286,16 @@ int main(int argc, char** argv)
   // to check for a network failure and shut down, I suppose.)
   setsockopt (raw.svc, SOL_SOCKET, SO_RCVTIMEO, (const char *)&(tv_1s), sizeof(tv_1s));
 
-  // Open observation information socket
-  if (serve (iport, &ci) < 0) {
-    multilog (log, LOG_ERR,
-      "Failed to create information socket on port %d.\n", iport);
+  // set up multi-cast observation information socket
+  int mc_info_sock = 0;
+  char mc_info_buf[1024];
+  mc_info_sock = openMultiCastSocket ("224.3.29.71", 20002);
+  if (mc_info_sock < 0) {
+    multilog (log, LOG_ERR, "Failed to open Observation multicast; openMultiCastSocket = %d\n",mc_info_sock);
     exit (EXIT_FAILURE);
   }
+  else
+    multilog (log, LOG_INFO, "Obsinfo socket: %d\n",mc_info_sock);
 
   // skip_frames is a klugey construct to handle the continual start/stop
   // of reading from the raw socket.  Between observations, the buffer will
@@ -318,7 +321,7 @@ int main(int argc, char** argv)
 
     if (state == STATE_STOPPED) {
       if (cmd == CMD_NONE)
-        cmd = wait_for_cmd (&c, logfile_fp);
+        cmd = basic_wait_for_cmd (mc_control_sock, mc_control_buf, 32, logfile_fp);
 
       if (cmd == CMD_START) 
       {
@@ -330,9 +333,9 @@ int main(int argc, char** argv)
         voltage_packet_counter = 0;
         // TODO -- block here until we get the observation info
         // TODO -- need to handle case of multiple observation documents
-        info_bytes_read = read (ci.rqst,ci.buf,1024);
+        info_bytes_read = read (mc_info_sock, mc_info_buf, 1024);
         multilog (log, LOG_INFO, "Read %d bytes from fd %d, expected %d.\n", 
-            info_bytes_read,ci.rqst,sizeof(ObservationDocument));
+            info_bytes_read,mc_info_sock,sizeof(ObservationDocument));
         // TODO -- what could happen here if heimdall runs behind, or if 
         // we have a long transient dump, is that we receive multiple ODs?
         // so check for a multiple of sizeof(OD) and then use the last one
@@ -341,7 +344,7 @@ int main(int argc, char** argv)
           multilog (log, LOG_ERR, "Not a valid ObservationDocument!\n");
         }
         else {
-          memcpy (&od, ci.buf, sizeof(ObservationDocument));
+          memcpy (&od, mc_info_buf, sizeof(ObservationDocument));
           char result[2048];
           print_observation_document (result,&od);
           multilog (log, LOG_INFO, "ObservationDocument:\n%s", result);
@@ -393,7 +396,7 @@ int main(int argc, char** argv)
       // this construct adds the two sockets to the FDs and then blocks
       // until input is available on one or the other; multiplexing
       FD_ZERO (&readfds);
-      FD_SET (c.rqst, &readfds);
+      FD_SET (mc_control_sock, &readfds);
       FD_SET (raw.svc, &readfds);
       if (select (maxsock+1,&readfds,NULL,NULL,&tv_500mus) < 0)
       {
@@ -403,8 +406,8 @@ int main(int argc, char** argv)
       }
       
       //if input is waiting on listening socket, read it
-      if (FD_ISSET (c.rqst,&readfds)) {
-        cmd = wait_for_cmd (&c, logfile_fp);
+      if (FD_ISSET (mc_control_sock,&readfds)) {
+        cmd = basic_wait_for_cmd (mc_control_sock, mc_control_buf, 32, logfile_fp);
       }
 
       // note to future self -- dump_time is not actually used below, I think
@@ -696,7 +699,9 @@ int main(int argc, char** argv)
     } // end STATE_STARTED logic
   } // end main loop over state/packets
   
-  shutdown(c.rqst,2);
+  shutdown (mc_control_sock,2);
+  shutdown (mc_info_sock,2);
+
   multilog (log, LOG_INFO,
       "dada_hdu_disconnect result = %d.\n", dada_hdu_disconnect (hdu));
   fclose (logfile_fp);

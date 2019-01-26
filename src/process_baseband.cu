@@ -25,6 +25,7 @@ extern "C" {
 #include "utils.h"
 #include "def.h"
 #include "executor.h"
+#include "multicast.h"
 }
 
 static volatile int NBIT = 2;
@@ -42,7 +43,9 @@ void usage ()
 	  "-b reduce output to b bits (2 [def], 4, and 8 are supported))\n"
 	  "-P number of output polarizations (1=AA+BB, 2=AA,BB; 4 not implemented)\n"
 	  "-r RFI-excision mode (0=no excision, 1=only excision, 2=[default]write both data sets)\n"
+	  "-i Inject an FRB at DM=80 periodicially in the output data.\n"
     "-s process a single observation, then quit (used for debugging)\n"
+    "-p process a single recorded observation, then quit (used for profiling))\n"
     "-g run on specified GPU\n"
 	  //"-m retain MUOS band\n"
 	  ,(uint64_t)READER_SERVICE_PORT);
@@ -611,6 +614,7 @@ int main (int argc, char *argv[])
   vdif_header* vdhdr = (vdif_header*) frame_buff;
   uint8_t* dat = (uint8_t*)(frame_buff + 32);
 
+  /*
   // connect to control socket
   Connection conn;
   conn.sockoptval = 1; //release port immediately after closing connection
@@ -623,6 +627,19 @@ int main (int argc, char *argv[])
     fcntl (conn.rqst, F_SETFL, O_NONBLOCK); // set up for polling
   }
   char cmd_buff[32];
+  */
+
+  // connect to multicast control socket
+  int mc_control_sock = 0;
+  char mc_control_buff[32];
+  mc_control_sock = openMultiCastSocket ("224.3.29.71", 20000);
+  if (mc_control_sock < 0) {
+    multilog (log, LOG_ERR, "Failed to open Observation multicast; openMultiCastSocket = %d\n",mc_control_sock);
+    exit (EXIT_FAILURE);
+  }
+  else
+    multilog (log, LOG_INFO, "Control socket: %d\n",mc_control_sock);
+  fcntl (mc_control_sock, F_SETFL, O_NONBLOCK); // set up for polling
 
   int quit = 0;
   int inject_frb_now = 0;
@@ -661,11 +678,11 @@ int main (int argc, char *argv[])
     // shutting down the data acquisition system; check to see if a
     // CMD_QUIT has been issued in order to log the appropriate outcome
     ssize_t npoll_bytes = 0;
-    if (port) npoll_bytes = read (conn.rqst, cmd_buff, 32);
+    npoll_bytes = read (mc_control_sock, mc_control_buff, 32);
     if (npoll_bytes >  0) {
       for (int ib = 0; ib < npoll_bytes; ib++) {
-        printf("Read command character %c.\n",cmd_buff[ib]);
-        if (cmd_buff[ib] == CMD_QUIT) {
+        printf("Read command character %c.\n",mc_control_buff[ib]);
+        if (mc_control_buff[ib] == CMD_QUIT) {
           multilog (log, LOG_INFO,
               "Received CMD_QUIT, indicating data taking is ceasing.  Exiting.\n");
           quit = 1;
@@ -998,6 +1015,7 @@ int main (int argc, char *argv[])
          break;
     }
 
+    /*
     // every 1s, check for a QUIT command
     ssize_t npoll_bytes = 0;
     if (port) npoll_bytes = read (conn.rqst, cmd_buff, 32);
@@ -1016,12 +1034,34 @@ int main (int argc, char *argv[])
       // of observation loop to exit program
       break;
     }
+    */
+
+    // check for a QUIT command on the multicast control socket
+    // NB this could probably be changed to recvfrom!  in fact, once set
+    // to nonblocking, can use the MultiCastReceive function
+    ssize_t npoll_bytes = 0;
+    npoll_bytes = read (mc_control_sock, mc_control_buff, 32);
+    if (npoll_bytes >  0) {
+      for (int ib = 0; ib < npoll_bytes; ib++) {
+        printf("Read command character %c.\n",mc_control_buff[ib]);
+        if (mc_control_buff[ib] == CMD_QUIT) {
+          quit = 1;
+          break;
+        }
+      }
+    }
+    if (quit) {
+      multilog (log, LOG_INFO, "Received CMD_QUIT.  Exiting!.\n");
+      // this will break out of data loop, write out file, then break out
+      // of observation loop to exit program
+      break;
+    }
 
     // keep log on disk up to date
     fflush (logfile_fp);
 
     // check for FRB injection conditions
-    inject_frb_now = do_inject_frb && (current_sec%10==0);
+    inject_frb_now = do_inject_frb && (current_sec%20==0);
     if (inject_frb_now)
       multilog (log, LOG_INFO,
         "Injecting an FRB with integrated = %.2f!!!.\n", integrated);
@@ -1061,7 +1101,7 @@ int main (int argc, char *argv[])
       char heimdall_cmd[256];
       // NB need to redirect stderr or else we can't catch it
       // TODO -- consider adding zap chans to bottom of band?
-      snprintf (heimdall_cmd, 255, "heimdall -nsamps_gulp 45000 -gpu_id %d -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -zap_chans 3900 4096 -beam %d -k %x -coincidencer vlite-nrl:27555 -V", gpu_id, station_id, key_out + active_buffer*2); 
+      snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 45000 -gpu_id %d -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -zap_chans 3900 4096 -beam %d -k %x -coincidencer vlite-nrl:27555 -V", gpu_id, station_id, key_out + active_buffer*2); 
       multilog (log, LOG_INFO, "%s\n", heimdall_cmd);
       heimdall_fp[active_buffer] = popen (heimdall_cmd, "r");
       heimdall_launched = true;
@@ -1170,7 +1210,8 @@ int main (int argc, char *argv[])
         // (1) NB that fft_in_kur==fft_in if not writing both streams
         // (2) original implementation had a block for each pol; keeping
         //     that, but two blocks now access the same Dagostino entry
-        if (integrated >= 0.1)
+        //if (integrated >= 0.1)
+        if (1)
         {
           apply_kurtosis <<<nkurto_per_chunk, 256>>> (
               fft_in,fft_in_kur,dag_dev,dag_fb_dev,kur_weights_dev);
@@ -1554,8 +1595,10 @@ int main (int argc, char *argv[])
 
   } // end loop over observations
 
-  // close sockets and files
-  shutdown (conn.rqst, 2);
+  // close multicast sockets
+  if (mc_control_sock > 0)
+    shutdown (mc_control_sock, 2);
+
 
   // clean up psrdada data structures
   dada_hdu_disconnect (hdu_in);
@@ -1568,7 +1611,7 @@ int main (int argc, char *argv[])
     }
   }
 
-  //free memory
+  // free memory
   cudaFreeHost (udat);
   cudaFree (udat_dev);
   cudaFree (fft_in);
