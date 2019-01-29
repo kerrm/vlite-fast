@@ -25,19 +25,20 @@ def print_obsdoc(data):
     elems = e.getchildren()
     tags = [x.tag for x in elems]
     s = '\n'.join((
-    ("    datasetId = %s\n"%(e.attrib['datasetId'])),
-    ("    configId = %s\n"%(e.attrib['configId'])),
-    ("    startTime = %10.8f\n"%(float(e.attrib['startTime']))),
-    ("    name = %s\n"%(elems[tags.index('name')].text)),
-    ("    ra = %10.8f\n"%(float(elems[tags.index('ra')].text))),
-    ("    dec = %10.8f\n"%(float(elems[tags.index('dec')].text))),
+    (" Observation:"),
+    ("    datasetId = %s"%(e.attrib['datasetId'])),
+    ("    configId = %s"%(e.attrib['configId'])),
+    ("    startTime = %10.8f"%(float(e.attrib['startTime']))),
+    ("    name = %s"%(elems[tags.index('name')].text)),
+    ("    ra = %10.8f"%(float(elems[tags.index('ra')].text))),
+    ("    dec = %10.8f"%(float(elems[tags.index('dec')].text))),
     #print("    dra = %10.8f\n", od->dra);
     #print("    ddec = %10.8f\n", od->ddec);
     #print("    azoffs = %10.8f\n", od->azoffs);
     #print("    eloffs = %10.8f\n", od->eloffs);
-    ("    startLST = %10.8f\n"%(float(elems[tags.index('startLST')].text))),
-    ("    scanNo = %s\n"%(elems[tags.index('scanNo')].text)),
-    ("    subscanNo = %s\n"%(elems[tags.index('subscanNo')].text)),
+    ("    startLST = %10.8f"%(float(elems[tags.index('startLST')].text))),
+    ("    scanNo = %s"%(elems[tags.index('scanNo')].text)),
+    ("    subscanNo = %s"%(elems[tags.index('subscanNo')].text)),
     #print("    primaryBand = %s\n", od->primaryBand);
     #print("    usesPband = %d\n", od->usesPband);
     ))
