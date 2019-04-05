@@ -1,0 +1,11 @@
+#!/bin/bash
+ssh mkerr@vlite-difx2 "find /mnt/ssd/fildata -type f -mmin +59 -delete -name *.fil < /dev/null &> /dev/null" < /dev/null &> /dev/null
+ssh mkerr@vlite-difx3 "find /mnt/ssd/fildata -type f -mmin +59 -delete -name *.fil < /dev/null &> /dev/null" < /dev/null &> /dev/null
+ssh mkerr@vlite-difx4 "find /mnt/ssd/fildata -type f -mmin +59 -delete -name *.fil < /dev/null &> /dev/null" < /dev/null &> /dev/null
+ssh mkerr@vlite-difx5 "find /mnt/ssd/fildata -type f -mmin +59 -delete -name *.fil < /dev/null &> /dev/null" < /dev/null &> /dev/null
+ssh mkerr@vlite-difx6 "find /mnt/ssd/fildata -type f -mmin +59 -delete -name *.fil < /dev/null &> /dev/null" < /dev/null &> /dev/null
+ssh mkerr@vlite-difx7 "find /mnt/ssd/fildata -type f -mmin +59 -delete -name *.fil < /dev/null &> /dev/null" < /dev/null &> /dev/null
+ssh mkerr@vlite-difx8 "find /mnt/ssd/fildata -type f -mmin +59 -delete -name *.fil < /dev/null &> /dev/null" < /dev/null &> /dev/null
+ssh mkerr@vlite-difx9 "find /mnt/ssd/fildata -type f -mmin +59 -delete -name *.fil < /dev/null &> /dev/null" < /dev/null &> /dev/null
+ssh mkerr@vlite-difx10 "find /mnt/ssd/fildata -type f -mmin +59 -delete -name *.fil < /dev/null &> /dev/null" < /dev/null &> /dev/null
+ssh mkerr@vlite-difx11 "find /mnt/ssd/fildata -type f -mmin +59 -delete -name *.fil < /dev/null &> /dev/null" < /dev/null &> /dev/null

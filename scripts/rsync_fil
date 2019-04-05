@@ -1,0 +1,12 @@
+#!/bin/bash
+rsync -avz --bwlimit 10000 --progress vlite-difx2:/mnt/ssd/fildata/*fil /data/vlite-fast/fil
+rsync -avz --bwlimit 10000 --progress vlite-difx3:/mnt/ssd/fildata/*fil /data/vlite-fast/fil
+rsync -avz --bwlimit 10000 --progress vlite-difx4:/mnt/ssd/fildata/*fil /data/vlite-fast/fil
+rsync -avz --bwlimit 10000 --progress vlite-difx5:/mnt/ssd/fildata/*fil /data/vlite-fast/fil
+rsync -avz --bwlimit 10000 --progress vlite-difx6:/mnt/ssd/fildata/*fil /data/vlite-fast/fil
+rsync -avz --bwlimit 10000 --progress vlite-difx7:/mnt/ssd/fildata/*fil /data/vlite-fast/fil
+rsync -avz --bwlimit 10000 --progress vlite-difx8:/mnt/ssd/fildata/*fil /data/vlite-fast/fil
+rsync -avz --bwlimit 10000 --progress vlite-difx9:/mnt/ssd/fildata/*fil /data/vlite-fast/fil
+rsync -avz --bwlimit 10000 --progress vlite-difx10:/mnt/ssd/fildata/*fil /data/vlite-fast/fil
+rsync -avz --bwlimit 10000 --progress vlite-difx11:/mnt/ssd/fildata/*fil /data/vlite-fast/fil
+rsync -avz --bwlimit 10000 --progress vlite-difx12:/mnt/ssd/fildata/*fil /data/vlite-fast/fil
