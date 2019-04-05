@@ -29,6 +29,7 @@ char testgrp[] = "239.199.3.2";
 char obsinfogrp[] = "239.192.3.2";
 char antpropgrp[] = "239.192.3.1";
 char alertgrp[] = "239.192.2.3";
+char vlitegrp[] = "224.3.29.71";
 
 int mc_reader_port = 20000;
 int mc_writer_port = 20001;
@@ -40,7 +41,8 @@ static volatile int signal_received = 0;
 
 void usage ()
 {
-  fprintf(stdout,"Usage: messenger configuration_file [options]\n"
+  //fprintf(stdout,"Usage: messenger configuration_file [options]\n"
+  fprintf(stdout,"Usage: messenger [options]\n"
 	  "-m enable manual control on specified port (e.g. via telnet)\n"
 	  "-o print logging messages to stdout (as well as logfile)\n"
   );
@@ -120,9 +122,11 @@ int main(int argc, char** argv)
     } // end switch statement
   } // end argument parsing
 
+  /* Removed 4/4/2019 by MTK
   // check for mandatory configuration file
   if (optind==argc)
     fprintf (stderr, "Must specify configuration file!.\n");
+  */
 
 
   multilog_t* log = multilog_open ("messenger",0);
@@ -143,6 +147,8 @@ int main(int argc, char** argv)
   if (stdout_output)
     multilog_add (log, stdout);
 
+  /* Remove this code for now, not really needed with multicast.
+   * Removed 4/4/2019 by MTK.
   int nvconf = 0;
   VFASTConfig** vconf = parse_vfast_config (argv[optind], &nvconf);
   if (NULL == vconf) {
@@ -154,6 +160,7 @@ int main(int argc, char** argv)
   for (int iconfig = 0; iconfig < nvconf; ++iconfig)
     multilog (log, LOG_INFO, "Configuration %d:\n%s", iconfig, 
         print_vfast_config (vconf[iconfig], NULL));
+  */
 
   const char cmdstop[] = {CMD_STOP};
   const char cmdevent[] = {CMD_EVENT};
@@ -306,12 +313,11 @@ int main(int argc, char** argv)
             }
           }
         
-          // TO ADD: Check that Writers are still connected before sending; change their isonnected elements if they are not
           if (strcasecmp (od->name,"FINISH") == 0)
           {
             multilog (log, LOG_INFO, "sending STOP command\n");
-            mc_send ("224.3.29.71",mc_reader_port,cmdstop,1,log);
-            mc_send ("224.3.29.71",mc_writer_port,cmdstop,1,log);
+            mc_send (vlitegrp,mc_reader_port,cmdstop,1,log);
+            mc_send (vlitegrp,mc_writer_port,cmdstop,1,log);
             recording = 0;
             // TEMP -- see if this sleep is helpful
             nanosleep (&ts_500ms, NULL);
@@ -329,14 +335,20 @@ int main(int argc, char** argv)
               // check to see if the pointing position has changed; tweak
               // this to allow for small changes to keep integrating during
               // VLASS
-              if ((fabs(od->ra-last_ra)< 0.5) && fabs(od->dec-last_dec) < 0.5)
+              fprintf (stderr, "odra = %.2f, ra=%.2f, oddec=%.2f dec=%.2f\n", od->ra,last_ra,od->dec,last_dec);
+              // NB these coordinates are in radians, so requirement of
+              // 1/2 degree is 0.00873 rad
+              // TODO -- handle RA wraps
+              if ((fabs(od->ra-last_ra)< 0.00873) && fabs(od->dec-last_dec) < 0.00873)
               {
                 multilog (log, LOG_INFO,
                     "Pointing unchanged, will continue to integrate.\n");
                 last_ra = od->ra;
                 last_dec = od->dec;
+                fprintf (stderr, "ra=%.2f, dec=%.2f\n", last_ra,last_dec);
                 time (&stop_integ);
                 double dt = difftime (stop_integ, start_integ);
+                fprintf (stderr, "dt=%.2f\n",dt);
                 if (dt < max_integ)
                   continue;
                 else
@@ -346,7 +358,7 @@ int main(int argc, char** argv)
               }
 
               multilog (log, LOG_INFO, "sending STOP command\n");
-              mc_send ("224.3.29.71",mc_writer_port,cmdstop,1,log);
+              mc_send (vlitegrp,mc_writer_port,cmdstop,1,log);
               // this is empirical, but seems to be long enough to allow
               // messages to propagate before sending the next command;
               // can also avoid this by altering wait_for_cmd to not discard
@@ -360,9 +372,9 @@ int main(int argc, char** argv)
             time (&start_integ);
             multilog (log, LOG_INFO,"sending START command\n");
 
-            mc_send ("224.3.29.71",mc_reader_port,cmdstart,1,log);
-            mc_send ("224.3.29.71",mc_writer_port,cmdstart,1,log);
-            mc_send ("224.3.29.71",mc_info_port,(char*)(od),sizeof(ObservationDocument),log);
+            mc_send (vlitegrp,mc_reader_port,cmdstart,1,log);
+            mc_send (vlitegrp,mc_writer_port,cmdstart,1,log);
+            mc_send (vlitegrp,mc_info_port,(char*)(od),sizeof(ObservationDocument),log);
             multilog (log, LOG_INFO,"sent START command\n");
             fflush (stderr); fflush (stdout);
             nanosleep (&ts_10ms, NULL);
@@ -434,19 +446,19 @@ int main(int argc, char** argv)
         ObservationDocument dummy;
         fill_dummy_obs_doc (&dummy);
         multilog (log, LOG_INFO, "sending manual START command\n");
-        mc_send ("224.3.29.71",mc_reader_port,cmdstart,1,log);
-        mc_send ("224.3.29.71",mc_writer_port,cmdstart,1,log);
-        mc_send ("224.3.29.71",mc_info_port,(char *)(&dummy),sizeof(ObservationDocument),log);
+        mc_send (vlitegrp,mc_reader_port,cmdstart,1,log);
+        mc_send (vlitegrp,mc_writer_port,cmdstart,1,log);
+        mc_send (vlitegrp,mc_info_port,(char *)(&dummy),sizeof(ObservationDocument),log);
       }
       else if (cmd == CMD_EVENT) {
         multilog (log, LOG_INFO, "sending manual EVENT command\n");
-        mc_send ("224.3.29.71",mc_reader_port,cmdstop,1,log);
-        mc_send ("224.3.29.71",mc_writer_port,cmdevent,1,log);
+        mc_send (vlitegrp,mc_reader_port,cmdstop,1,log);
+        mc_send (vlitegrp,mc_writer_port,cmdevent,1,log);
       }
       else if (cmd == CMD_STOP) {
         multilog (log, LOG_INFO, "sending STOP command\n");
-        mc_send ("224.3.29.71",mc_reader_port,cmdstop,1,log);
-        mc_send ("224.3.29.71",mc_writer_port,cmdstop,1,log);
+        mc_send (vlitegrp,mc_reader_port,cmdstop,1,log);
+        mc_send (vlitegrp,mc_writer_port,cmdstop,1,log);
       }
       else if (cmd == CMD_QUIT) {
         multilog (log, LOG_INFO, "breaking from main loop\n");
@@ -464,13 +476,15 @@ int main(int argc, char** argv)
   fclose (logfile_fp);
 
   // shut down readers
-  mc_send ("224.3.29.71",mc_reader_port,cmdquit,1,log);
+  mc_send (vlitegrp,mc_reader_port,cmdquit,1,log);
   // run writers for a little longer to avoid readers hanging
   sleep (2);
-  mc_send ("224.3.29.71",mc_writer_port,cmdquit,1,log);
+  mc_send (vlitegrp,mc_writer_port,cmdquit,1,log);
 
+  /* Removed 4/4/2019 by MTK
   // clean up configuration memory
   for (int ii=0; ii < nvconf; ++ii)
     free (vconf[ii]);
   //fclose(efd);
+  */
 }
