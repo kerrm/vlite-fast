@@ -17,16 +17,22 @@ ${PACKAGE_DIR}/vlite-fast/scripts/start_dada $(( ${3} + 2 )) 10485760 8
 fi
 
 # start nvidia-smi logging if not already
-if [ ! $(pgrep -x nvidia-smi) ]
-then
-  nvidia-smi -f ${PACKAGE_DIR}/logs/nvidia-smi_log_$(hostname).asc -l 2 &
-  NVIDIA_SMI_PID=$!
-else
-  NVIDIA_SMI_PID=0
-fi
-echo "NVIDIA_SMI_PID=${NVIDIA_SMI_PID}"
+# MTK 12/17/2018 -- disable nvidia-smi logging for now
+#if [ ! $(pgrep -x nvidia-smi) ]
+#then
+#  nvidia-smi -f ${PACKAGE_DIR}/logs/nvidia-smi_log_$(hostname).asc -l 2 &
+#  NVIDIA_SMI_PID=$!
+#else
+#  NVIDIA_SMI_PID=0
+#fi
+#echo "NVIDIA_SMI_PID=${NVIDIA_SMI_PID}"
 
-${PACKAGE_DIR}/bin/process_baseband -p ${1} -k ${2} -K ${3} -w ${4} -b ${5} -g ${6} -o
+# "i" is inject FRB
+${PACKAGE_DIR}/bin/process_baseband -k ${2} -K ${3} -w ${4} -b ${5} -g ${6} -o -i
+# this will only write kurtosis
+#${PACKAGE_DIR}/bin/process_baseband -k ${2} -K ${3} -w ${4} -b ${5} -g ${6} -o -r 1
+# this will write both
+#${PACKAGE_DIR}/bin/process_baseband -k ${2} -K ${3} -w ${4} -b ${5} -g ${6} -o 
 if [ ${3} -gt 0 ]
 then
   if [ pgrep -x heimdall > /dev/null ]
@@ -34,11 +40,13 @@ then
     wait $(pgrep -x heimdall)
   fi
 sleep 1
-sudo ${PACKAGE_DIR}/bin/dada_db -k ${3} -d
-sudo ${PACKAGE_DIR}/bin/dada_db -k $(( ${3} + 2 )) -d
+#sudo ${PACKAGE_DIR}/bin/dada_db -k ${3} -d
+#sudo ${PACKAGE_DIR}/bin/dada_db -k $(( ${3} + 2 )) -d
+/mnt/ssd/bin/dada_db -k ${3} -d
+/mnt/ssd/bin/dada_db -k $(( ${3} + 2 )) -d
 fi
 
-if [ $NVIDIA_SMI_PID -gt 0 ]
-then
-  kill $NVIDIA_SMI_PID
-fi
+#if [ $NVIDIA_SMI_PID -gt 0 ]
+#then
+#  kill $NVIDIA_SMI_PID
+#fi

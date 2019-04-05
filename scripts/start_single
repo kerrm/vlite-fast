@@ -12,7 +12,7 @@
 # $10 = nbit
 #set -x
 PACKAGE_DIR=/home/vlite-master/mtk
-CUDA_DIR=/usr/cuda
+CUDA_DIR=/usr/cuda-9.2.88
 export LD_LIBRARY_PATH=${PACKAGE_DIR}/lib:${CUDA_DIR}/lib64:${LD_LIBRARY_PATH}
 #sleep 0.5
 
@@ -23,7 +23,8 @@ export LD_LIBRARY_PATH=${PACKAGE_DIR}/lib:${CUDA_DIR}/lib64:${LD_LIBRARY_PATH}
 # $3 = info port
 # $4 = baseband dada key
 #sudo -b /home/vlite-master/mtk/scripts/start_writer ${2} ${5} ${6} ${7}
-sudo -b LD_LIBRARY_PATH=${PACKAGE_DIR}/lib ${PACKAGE_DIR}/vlite-fast/scripts/start_writer ${2} ${5} ${6} ${7}
+#sudo -b LD_LIBRARY_PATH=${PACKAGE_DIR}/lib ${PACKAGE_DIR}/vlite-fast/scripts/start_writer ${2} ${5} ${6} ${7}
+${PACKAGE_DIR}/vlite-fast/scripts/start_writer ${2} ${5} ${6} ${7} &
 sleep 0.5
 
 # $1 = reader port

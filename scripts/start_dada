@@ -9,10 +9,13 @@
 # $2 = size in bytes
 # $3 = number of buffers
 PACKAGE_DIR=/home/vlite-master/mtk
-${PACKAGE_DIR}/bin/dada_db -k ${1} -l -b ${2} -n ${3}
+#${PACKAGE_DIR}/bin/dada_db -k ${1} -l -b ${2} -n ${3}
+/mnt/ssd/bin/dada_db -k ${1} -l -b ${2} -n ${3}
 # check return value of output for success
 if [ $? -ne 0 ]
 then
-${PACKAGE_DIR}/bin/dada_db -k ${1} -d
-${PACKAGE_DIR}/bin/dada_db -k ${1} -l -b ${2} -n ${3}
+#${PACKAGE_DIR}/bin/dada_db -k ${1} -d
+#${PACKAGE_DIR}/bin/dada_db -k ${1} -l -b ${2} -n ${3}
+/mnt/ssd/bin/dada_db -k ${1} -d
+/mnt/ssd/bin/dada_db -k ${1} -l -b ${2} -n ${3}
 fi
