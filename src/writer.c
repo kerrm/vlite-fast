@@ -57,6 +57,7 @@ int write_psrdada_header(dada_hdu_t* hdu, vdif_header* hdr, ObservationDocument*
   dadacheck (ascii_header_set (ascii_hdr, "DEC", "%lf", od->dec) );
   dadacheck (ascii_header_set (ascii_hdr, "NAME", "%s", od->name) );
   dadacheck (ascii_header_set (ascii_hdr, "SCANSTART", "%lf", od->startTime) );
+  dadacheck (ascii_header_set (ascii_hdr, "DATAID", "%s", od->datasetId) );
   // get time from VDIF frame
   struct tm tm_epoch = {0};
   int vdif_epoch = getVDIFEpoch (hdr);
@@ -321,7 +322,7 @@ int main(int argc, char** argv)
 
     if (state == STATE_STOPPED) {
       if (cmd == CMD_NONE)
-        cmd = basic_wait_for_cmd (mc_control_sock, mc_control_buf, 32, logfile_fp);
+        cmd = check_for_cmd (mc_control_sock, mc_control_buf, 32, logfile_fp);
 
       if (cmd == CMD_START) 
       {
@@ -407,7 +408,7 @@ int main(int argc, char** argv)
       
       //if input is waiting on listening socket, read it
       if (FD_ISSET (mc_control_sock,&readfds)) {
-        cmd = basic_wait_for_cmd (mc_control_sock, mc_control_buf, 32, logfile_fp);
+        cmd = check_for_cmd (mc_control_sock, mc_control_buf, 32, logfile_fp);
       }
 
       // note to future self -- dump_time is not actually used below, I think
@@ -697,6 +698,7 @@ int main(int argc, char** argv)
         } // end multiple packet read
       } // end raw socket read logic
     } // end STATE_STARTED logic
+
   } // end main loop over state/packets
   
   shutdown (mc_control_sock,2);

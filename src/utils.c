@@ -102,18 +102,17 @@ int serve (int port, Connection* c) {
  */
 int wait_for_cmd (Connection* c, FILE* outstream) {
 
-  return basic_wait_for_cmd (c->rqst, c->buf, MAXINBUFSIZE, outstream);
+  return check_for_cmd (c->rqst, c->buf, MAXINBUFSIZE, outstream);
 
 }
 
 
-int basic_wait_for_cmd (int socket, char* buf, int maxlen, FILE* outstream) {
+int check_for_cmd (int socket, char* buf, int maxlen, FILE* outstream) {
 
   if (NULL == outstream) outstream = stderr;
 
-  fprintf (outstream, "in wait_for_cmd\n");
-
   int nbytes = read (socket,buf,maxlen);
+  if (nbytes < 0) return CMD_NONE;
   buf[nbytes] = '\0';
   fprintf (outstream, "wait_for_cmd: read %d bytes: %.*s\n",nbytes,nbytes,buf);
   
@@ -163,6 +162,57 @@ int basic_wait_for_cmd (int socket, char* buf, int maxlen, FILE* outstream) {
   }
 }
 
+/*
+ * Test for a specific command by searching through all queued commands
+ * available on the socket buffer.
+*/
+int test_for_cmd (int testcmd, int socket, char* buf, int maxlen, FILE* outstream) {
+
+  int nbytes = read (socket,buf,maxlen);
+  if (nbytes <= 0) return 0;
+  for (int ib = 0; ib < nbytes; ib++) {
+    if (buf[ib] == testcmd) 
+      return 1;
+  }
+  return 0;
+}
+
+void get_cmds (int* cmds, int socket, char* buf, int maxlen, FILE* outstream) {
+
+  for (int i = 0; i < 5; ++i)
+    cmds[i] = 0;
+
+  int nbytes = read (socket,buf,maxlen);
+  if (nbytes <= 0) return;
+
+  for (int ib = 0; ib < nbytes; ib++) {
+    if (buf[ib] == CMD_START)
+    {
+      cmds[0] = 1;
+      continue;
+    }
+    if (buf[ib] == CMD_STOP)
+    {
+      cmds[1] = 1;
+      continue;
+    }
+    if (buf[ib] == CMD_QUIT)
+    {
+      cmds[2] = 1;
+      continue;
+    }
+    if (buf[ib] == CMD_EVENT)
+    {
+      cmds[3] = 1;
+      continue;
+    }
+    if (buf[ib] == CMD_NONE)
+    {
+      cmds[4] = 1;
+      continue;
+    }
+  }
+}
 /*
   Input: pointer to initialized data block, opened writable file descriptor
   

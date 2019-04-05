@@ -36,7 +36,9 @@ typedef struct {
 
 int serve(int port, Connection* c);
 int wait_for_cmd(Connection* c, FILE* fp);
-int basic_wait_for_cmd (int socket, char* buf, int maxlen, FILE* outstream);
+int check_for_cmd (int socket, char* buf, int maxlen, FILE* outstream);
+int test_for_cmd (int testcmd, int socket, char* buf, int maxlen, FILE* outstream);
+void get_cmds (int* cmds, int socket, char* buf, int maxlen, FILE* outstream);
 void event_to_file(const ipcio_t* db, FILE* evfd);
 int conn(Connection *c);
 void disconn(Connection *c);
