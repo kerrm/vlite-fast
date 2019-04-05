@@ -18,7 +18,7 @@ MAX_DUMP = 20
 
 # set up a listening socket for heimdall server
 
-def make_server (nmax=15):
+def make_server (nmax=18):
     s = socket.socket (socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt (socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind ( ('vlite-nrl', HEIMDALL_PORT) )
@@ -55,9 +55,11 @@ if __name__ == '__main__':
     server_socket = make_server()
     utc_groups = dict()
     utc_sent_triggers = defaultdict(set)
+    output = file('/home/vlite-master/mtk/trigger_log.asc','a')
     while (True):
         clientsocket, address = server_socket.accept ()
-        print 'Received a connection from ', address
+        print 'Received a connection from %s\n.'%address
+        output.write('Received a connection from %s\n.'%address)
         payload = deque()
         while (True):
             msg = clientsocket.recv (4096)
@@ -66,6 +68,7 @@ if __name__ == '__main__':
             payload.append(msg)
         lines = filter(lambda l: len(l) > 0,
             map(str.strip,''.join(payload).split('\n')))
+        output.write('\n'.join(lines))
         print lines[0]
         # add this temporarily, to allow reconstruction of candidates
         # that are received
