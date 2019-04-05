@@ -104,9 +104,16 @@ int check_name (char* src)
           strstr (src, "J0341+5711") != NULL ||
           strstr (src, "J1713+0747") != NULL ||
           strstr (src, "R2") != NULL ||
+          strstr (src, "R3") != NULL ||
           //strstr (src, "3C345") != NULL ||
           strstr (src, "J1909-3744") != NULL);
 
+}
+
+int check_id (char* src)
+{
+  return (strstr (src, "18B-405") != NULL ||
+          strstr (src, "19A-331") != NULL);
 }
 
 double coord_dist (double ra1, double ra2, double de1, double de2)
@@ -122,8 +129,12 @@ int check_coords (double raj, double dej, double tol)
   // NB everything is in radians!
   // positions of interest
 
-  // position 1 -- R2
+  // position 1 -- arr2
   if (coord_dist(1.14479055, raj, 1.28572588, dej) < tol)
+    return 1;
+  //
+  // position 1 -- arr3
+  if (coord_dist(0.5110324, raj, 1.14737945, dej) < tol)
     return 1;
 
   // position 2 -- XTE 1809-197
@@ -139,21 +150,20 @@ void send_email(char* src_name, char* host_name)
   // is obviously with a daemon running on vlite-nrl or something, but OK
   if (strstr (host_name, "vlite-difx3") == NULL)
     return;
-  static time_t t[4] = {0,0,0,0};
-  int idx = -1;
+  static time_t t[5] = {0,0,0,0,0};
+  int idx = 4;
   if (strstr (src_name, "R2") != NULL)
     idx = 0;
   else if (strstr (src_name, "3C147") != NULL)
     idx = 1;
   else if (strstr (src_name, "3C48") != NULL)
     idx = 2;
-  //else if (strstr (src_name, "3C345") != NULL)
-  //  idx = 3;
-  if (idx < 0)
-    return;
+  else if (strstr (src_name, "R3") != NULL)
+    idx = 3;
+  // Lump all other sources into a single indx
   time_t new_time;
   time (&new_time);
-  if ((new_time - t[idx]) > 3600)
+  if ((new_time - t[idx]) > 1800)
   {
     // send email
     t[idx] = new_time;
