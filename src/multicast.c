@@ -34,7 +34,7 @@ int MulticastSend(const char *ip, int port, const char *message, int length)
 		
 			snprintf(portstr, 6, "%d", port);
 
-			printf("%d -> %s\n", port, portstr);
+			//printf("%d -> %s\n", port, portstr);
 
 			l = getaddrinfo(ip, portstr, &hints, &servinfo);
 			if(l != 0)

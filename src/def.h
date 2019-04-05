@@ -26,6 +26,8 @@
 
 #define EVENTDIR "/mnt/ssd/dumps"
 #define LOGDIR "/home/vlite-master/mtk/logs"
-#define DATADIR "/home/vlite-master/mtk/data"
+//#define DATADIR "/home/vlite-master/mtk/data"
+#define DATADIR "/mnt/ssd/fildata"
+#define CANDDIR "/mnt/ssd/cands"
 #define OBSINFODIR "/home/vlite-master/mtk/logs/obsinfo-antprop"
 
