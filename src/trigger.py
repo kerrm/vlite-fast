@@ -26,7 +26,7 @@ def make_server (nmax=18):
     s.listen (nmax)
     return s
 
-def trigger(all_cands,snthresh=8,minbeam=2,wmax=0.01,dmmin=100):
+def trigger(all_cands,snthresh=8,minbeam=2,wmax=0.01,dmmin=70):
     """ Go through coincidenced beams and determine if there is an event
     satisfying the trigger criteria.
     """
@@ -58,8 +58,8 @@ if __name__ == '__main__':
     output = file('/home/vlite-master/mtk/trigger_log.asc','a')
     while (True):
         clientsocket, address = server_socket.accept ()
-        print 'Received a connection from %s\n.'%address
-        output.write('Received a connection from %s\n.'%address)
+        print 'Received a connection from %s:%s.\n'%(address[0],address[1])
+        output.write('Received a connection from %s:%s.\n'%(address[0],address[1]))
         payload = deque()
         while (True):
             msg = clientsocket.recv (4096)
@@ -101,22 +101,29 @@ if __name__ == '__main__':
             #continue
             pass
 
+        print 'UTC',utc
+
         # coincidence them
         all_cands = coincidence(cgroups.values())
 
         # get triggers
         sent_triggers = utc_sent_triggers[utc]
-        triggers = set(trigger(all_cands,minbeam=1)).difference(sent_triggers)
+        current_triggers = trigger(all_cands,minbeam=2)
+        new_triggers = set(current_triggers).difference(sent_triggers)
+        print 'new_triggers len: ',len(new_triggers) # DEBUG
 
-        if len(triggers) == 0:
+        if len(new_triggers) == 0:
             continue
+
+        for trig in new_triggers:
+            print 'TRIGGERING ON CANDIDATE:',trig
 
         # group up triggers within MAX_DUMP seconds
         # for now, just allow one trigger per processing block (~30s)
         # could loop over sent triggers if needed
-        i0 = min((t.i0 for t in triggers))
+        i0 = min((t.i0 for t in new_triggers))
         i1 = -1
-        for trig in triggers:
+        for trig in new_triggers:
             if (trig.i1 - i0)*trig.tsamp < MAX_DUMP:
                 sent_triggers.add(trig)
                 i1 = max(i1,trig.i1)
@@ -125,5 +132,7 @@ if __name__ == '__main__':
         dump_offs = int(i1*trig.tsamp)
         dump_len = int( (i1-i0)*trig.tsamp ) + 1
 
+        # TODO -- it would be nice to print out the latency between the candidate peak time
+        # and the time the trigger is sent; it is 40-50 s with current gulp settings
         print 'Sending trigger for UTC %s with offset %d and length %d.'%(utc,dump_offs,dump_len)
 

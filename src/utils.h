@@ -30,9 +30,18 @@ typedef struct {
   uint64_t bufsz;     // size of buffer in bytes
   char fname[256];    // name of output file
   int status;         // status: -1 == working, 0 == success, >0 == error
+  int ms_delay;       // milliseconds to delay beginning of execution
   pthread_t tid;      // the thread context
 
 } threadio_t;
+
+typedef struct {
+  
+  time_t t0;          // start of trigger window 
+  time_t t1;          // end of trigger window
+  char meta[128];     // ancillary information like source name, ...
+
+} trigger_t;
 
 int serve(int port, Connection* c);
 int wait_for_cmd(Connection* c, FILE* fp);

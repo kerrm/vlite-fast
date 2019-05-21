@@ -557,6 +557,12 @@ void* buffer_dump (void* mem)
 {
   threadio_t* tio = (threadio_t*) mem;
   tio->status = -1;
+
+  if (tio->ms_delay > 0)
+  {
+    struct timespec ts_ms = get_ms_ts (tio->ms_delay);
+    nanosleep (&ts_ms,NULL);
+  }
   
   // malloc enough memory for local copy
   char* mybuff = malloc (tio->bufsz);

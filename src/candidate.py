@@ -53,7 +53,7 @@ class Candidate(object):
         return self.i0 < other.i1
 
     def __str__(self):
-        return 'i0=%d i1=%d w=%.2f sn=%.2f dm=%.2f'%(self.i0,self.i1,self.width*1000,self.sn,self.dm)
+        return 'i0=%06d i1=%06d w=%3.2f sn=%3.2f dm=%3.2f'%(self.i0,self.i1,self.width*1000,self.sn,self.dm)
 
 def coincidence (all_cands,delta_dm=0.1):
 
