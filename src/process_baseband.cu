@@ -149,23 +149,23 @@ int write_psrdada_header (dada_hdu_t* hdu, char* inchdr, vdif_header* vdhdr, int
 
 int  clear_psrdada_buffer (dada_hdu_t* hdu)
 {
-  //fprintf (stderr, "locking read");
+  fprintf (stderr, "locking read");
   dadacheck (dada_hdu_lock_read (hdu));
   uint64_t hdr_size = 0;
-  //fprintf (stderr, "clearing headers");
+  fprintf (stderr, "clearing headers");
   for (uint64_t i = 0; i < ipcbuf_get_nfull (hdu->header_block); ++i)
   {
     ipcbuf_get_next_read (hdu->header_block,&hdr_size);
     dadacheck (ipcbuf_mark_cleared (hdu->header_block));
   }
   ipcbuf_t* db = (ipcbuf_t*)hdu->data_block;
-  //fprintf (stderr, "clearing datas");
+  fprintf (stderr, "clearing datas");
   for (uint64_t i = 0; i < ipcbuf_get_nfull (db); ++i)
   {
     ipcbuf_get_next_read (db,&hdr_size);
     dadacheck (ipcbuf_mark_cleared (db));
   }
-  //fprintf (stderr, "cleared data\n");
+  fprintf (stderr, "cleared data\n");
   dadacheck (dada_hdu_unlock_read (hdu));
   return 0;
 }
@@ -440,6 +440,8 @@ int main (int argc, char *argv[])
   // connect to output buffer (optional)
   dada_hdu_t* hdu_out[NOUTBUFF] = {NULL};
   FILE* heimdall_fp[NOUTBUFF] = {NULL};
+  FILE* scrubber_fp[NOUTBUFF] = {NULL};
+  FILE* rebuild_fp[NOUTBUFF] = {NULL};
   int buffer_ok[NOUTBUFF] = {0};
   int active_buffer = 0;
   if (key_out) {
@@ -909,41 +911,55 @@ int main (int argc, char *argv[])
   // write out psrdada header; NB this locks the hdu for writing
   if (key_out)
   {
-    if (!buffer_ok[active_buffer])
+    // check status of buffer
+    if (buffer_ok[active_buffer] != 1)
     {
-      // either heimdall crashed, or previous obs. was too short to invoke
-      // heimdall; in either case, reset the psrdada buffer; I think the
-      // easiest way to do this is simply to create a new dada_hdu for
-      // the shared memory
-      fprintf (stderr, "restoring buffer\n");
-      int status = clear_psrdada_buffer (hdu_out[active_buffer]);
-      /*
-      dada_hdu_destroy (hdu_out[active_buffer]);
-      hdu_out[active_buffer] = dada_hdu_create (log);
-      dada_hdu_set_key (hdu_out[active_buffer],key_out+active_buffer*2);
-      if (dada_hdu_connect (hdu_out[active_buffer]) != 0) {
-        multilog (log, LOG_ERR, 
-            "Unable to connect to outgoing PSRDADA buffer #%d!\n",
-              active_buffer+1);
-        exit (EXIT_FAILURE);
-      }
-      */
-      if (status==0)
+      // check to see if we scrubbed the buffer
+      if (scrubber_fp[active_buffer] != NULL)
       {
+        fprintf (stderr, "doing buffer scrub logic\n");
+        fflush (stderr);
+
+        multilog (log, LOG_INFO, "Preparing to pclose scrubber.\n");
+        int scrub_stat = pclose (scrubber_fp[active_buffer]);
+        multilog (log, LOG_INFO, "scrubber pclose status: %d\n", scrub_stat);
+        scrubber_fp[active_buffer] = NULL;
+
+        if (scrub_stat == 0)
+          buffer_ok[active_buffer] = 1;
+      }
+      // otherwise we might have rebuilt it
+      else if (rebuild_fp[active_buffer] != NULL)
+      {
+        multilog (log, LOG_INFO, "Preparing to pclose rebuild.\n");
+        int rebuild_stat = pclose (rebuild_fp[active_buffer]);
+        multilog (log, LOG_INFO, "rebuild pclose status: %d\n", rebuild_stat);
+        rebuild_fp[active_buffer] = NULL;
+
+        // buffer needed to be rebuilt, so we must reconnect
+        dada_hdu_destroy (hdu_out[active_buffer]);
+        hdu_out[active_buffer] = dada_hdu_create (log);
+        dada_hdu_set_key (hdu_out[active_buffer],key_out+active_buffer*2);
+        if (dada_hdu_connect (hdu_out[active_buffer]) != 0) {
+          multilog (log, LOG_ERR, 
+              "Unable to connect to outgoing PSRDADA buffer #%d!\n",
+                active_buffer+1);
+          exit (EXIT_FAILURE);
+        }
         buffer_ok[active_buffer] = 1;
-        fprintf (stderr, "restored buffer\n");
-      }
-      else
-      {
-        fprintf (stderr, "unable to restore buffer\n");
-        buffer_ok[active_buffer] = 0;
       }
     }
+
     if (buffer_ok[active_buffer])
     {
       write_psrdada_header (hdu_out[active_buffer], incoming_hdr, vdhdr,
         npol, heimdall_file);
       fprintf (stderr, "write psrdada header\n");
+    }
+    else
+    {
+      multilog (log, LOG_ERR, "output buffer in bad state, disabling output.\n");
+      // TODO: signal this or exit process?
     }
   }
 
@@ -1094,7 +1110,7 @@ int main (int argc, char *argv[])
           // or set active buffer to need reset
         }
         heimdall_fp[active_buffer] = NULL;
-        multilog (log, LOG_INFO, "Successful pclose.\n");
+        multilog (log, LOG_INFO, "Successful heimdall pclose.\n");
         #if PROFILE
         CUDA_PROFILE_STOP(start,stop,&elapsed)
         heimdall_time += elapsed;
@@ -1103,8 +1119,8 @@ int main (int argc, char *argv[])
       char heimdall_cmd[256];
       // NB need to redirect stderr or else we can't catch it
       // TODO -- consider adding zap chans to bottom of band?
-      //snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 45000 -gpu_id %d -dm 2 1000 -boxcar_max 64 -output_dir %s -group_output -zap_chans 0 190 -zap_chans 3900 4096 -beam %d -k %x -coincidencer vlite-nrl:27555 -V", gpu_id, CANDDIR, station_id, key_out + active_buffer*2); 
-      snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 45000 -gpu_id %d -dm 2 1000 -boxcar_max 64 -output_dir %s -group_output -zap_chans 0 190 -zap_chans 3900 4096 -beam %d -k %x -V", gpu_id, CANDDIR, station_id, key_out + active_buffer*2); 
+      snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 30720 -gpu_id %d -dm 2 1000 -boxcar_max 64 -yield_cpu -output_dir %s -group_output -zap_chans 0 190 -zap_chans 3900 4096 -beam %d -k %x -coincidencer vlite-nrl:27555 -V &> /mnt/ssd/cands/heimdall_log.asc", gpu_id, CANDDIR, station_id, key_out + active_buffer*2); 
+      //snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 30720 -gpu_id %d -dm 2 1000 -boxcar_max 64 -yield_cpu -output_dir %s -group_output -zap_chans 0 190 -zap_chans 3900 4096 -beam %d -k %x", gpu_id, CANDDIR, station_id, key_out + active_buffer*2); 
       multilog (log, LOG_INFO, "%s\n", heimdall_cmd);
       heimdall_fp[active_buffer] = popen (heimdall_cmd, "r");
       heimdall_launched = true;
@@ -1252,15 +1268,15 @@ int main (int argc, char *argv[])
       #endif
 
       ////// INJECT FRB AS REQUESTED //////
-      if (inject_frb_now)
+      if (inject_frb_now > 0)
       {
         // NB that inject_frb_now is only reset every 1s, so we also use
         // it to keep track of how many segments have elapsed since the
         // FRB time, since this loop is over 100ms chunks which will be
         // < dispersed FRB width, typically
 
-        float frb_width = 2e-2*SEG_PER_SEC*FFTS_PER_SEG; //2ms (20ms?)
-        float frb_amp = 1.025/5; // gives a single-antenna S/N of about 10
+        float frb_width = 2e-3*SEG_PER_SEC*FFTS_PER_SEG; //2ms 
+        float frb_amp = 1.05; // gives a single-antenna S/N of about 25-30 for 2ms
         int nfft_since_frb = (inject_frb_now-1)*FFTS_PER_SEG;
         inject_frb <<< NCHAN/NTHREAD+1,NTHREAD >>> (fft_out, 
             frb_delays_dev, nfft_since_frb, frb_width, frb_amp);
@@ -1281,14 +1297,13 @@ int main (int argc, char *argv[])
       if (RFI_MODE == 0 || RFI_MODE == 2)
       {
         detect_and_normalize2 <<<(NCHAN*2)/NTHREAD+1,NTHREAD>>> (
-            fft_out,bp_dev,bp_scale,fft_per_chunk/2);
+            fft_out,bp_dev,bp_scale);
         cudacheck ( cudaGetLastError () );
       }
       if (RFI_MODE == 1 || RFI_MODE == 2)
       {
         detect_and_normalize3 <<<(NCHAN*2)/NTHREAD+1,NTHREAD>>> (
-            fft_out_kur,kur_weights_dev,bp_kur_dev,bp_scale,
-            fft_per_chunk/2);
+            fft_out_kur,kur_weights_dev,bp_kur_dev,bp_scale);
         cudacheck ( cudaGetLastError () );
       }
       #if PROFILE
@@ -1493,19 +1508,41 @@ int main (int argc, char *argv[])
 
   if (key_out)
   {
-    // if buffer is in good condition
     if (buffer_ok[active_buffer])
     {
+
+      // special case: sometimes observation is too short to result in *any*
+      // written bytes (e.g. VLASS srcSlew) and this will cause 
+      // dada_dbscrubber to hang.  Check for it before we unlock the buffer,
+      // and if the condition pertains, just write a word or two.
+      if ((!heimdall_launched) && (fb_bytes_written == 0))
+          ipcio_write (hdu_out[active_buffer]->data_block,(char*)fft_trim_u_hst,32);
+
+      fprintf (stderr, "process_baseband: before dada_hdu_unlock_write\n");
       dadacheck (dada_hdu_unlock_write (hdu_out[active_buffer]));
-      // if we did not launch heimdall, flag the buffer as bad so it will
-      // be cleared before re-used
+      fprintf (stderr, "process_baseband: after dada_hdu_unlock_write\n");
+      fflush (stderr);
       if (!heimdall_launched)
+      {
+        // need to scrub the buffer
         buffer_ok[active_buffer] = 0;
-      // otherwise, switch to the next buffer and allow heimdall to
-      // continue to process this one
-      if (NOUTBUFF == ++active_buffer)
-        active_buffer = 0;
+        char scrubber_cmd[128];
+        snprintf (scrubber_cmd, 127, "/home/vlite-master/mtk/bin/dada_dbscrubber -k %x -v -v", key_out + active_buffer*2); 
+        scrubber_fp[active_buffer] = popen (scrubber_cmd, "r");
+      }
     }
+    else
+    {
+      // need to rebuild buffer
+      char rebuild_cmd[128];
+      snprintf (rebuild_cmd, 127, "/home/vlite-master/mtk/vlite-fast/scripts/rebuild_dada %x", key_out + active_buffer*2); 
+      rebuild_fp[active_buffer] = popen (rebuild_cmd, "r");
+      buffer_ok[active_buffer] = 0;
+    }
+
+    // increment active buffer
+    if (NOUTBUFF == ++active_buffer)
+      active_buffer = 0;
   }
 
   // before disconnecting from input buffer, make sure we haven't aborted
@@ -2016,7 +2053,7 @@ __global__ void set_frb_delays (float* frb_delays, float dm)
   double freq = 0.384 - (i*0.064)/NCHAN;
   // delays are scaled by FFT timestep
   double scale = 4.15e-3*dm*SEG_PER_SEC*FFTS_PER_SEG;
-  frb_delays[i] = scale/(freq*freq)-scale/(0.384*0.384);
+  frb_delays[i] = float(scale/(freq*freq)-scale/(0.384*0.384));
 }
 
 __global__ void inject_frb ( cufftComplex *fft_out, float* frb_delays,
@@ -2031,17 +2068,19 @@ __global__ void inject_frb ( cufftComplex *fft_out, float* frb_delays,
   
   // for now, don't try to do any interpolation, just round to the nearest
   // time index that the FRB encounters this channel
-  int time_idx_lo = max (0, int(frb_delays[i]+0.5)-nfft_since_frb);
 
-  // if the lowest time isn't in this chunk, return
-  if (time_idx_lo >= FFTS_PER_SEG) return;
-
+  int time_idx_lo = int(frb_delays[i]+0.5)-nfft_since_frb;
   int time_idx_hi = int(frb_delays[i]+frb_width+0.5)-nfft_since_frb;
+
+  // if the earliest is after this chunk, return
+  if (time_idx_lo >= FFTS_PER_SEG) return;
 
   // if the latest time precedes this chunk, return
   if (time_idx_hi < 0) return;
 
-  time_idx_hi = min (FFTS_PER_SEG-1, time_idx_hi);
+  // ensure indices are within data bounds
+  if (time_idx_lo < 0) time_idx_lo = 0;
+  if (time_idx_hi >= FFTS_PER_SEG) time_idx_hi = FFTS_PER_SEG-1;
 
   // otherwise, there is a portion of the FRB in this chunk, so loop over
   // the time steps that it passes through channel i
@@ -2063,13 +2102,13 @@ __global__ void inject_frb ( cufftComplex *fft_out, float* frb_delays,
 }
 
 __global__ void detect_and_normalize2 (cufftComplex *fft_out, cufftReal* bp, 
-        float scale, size_t ntime)
+        float scale)
 {
   int i = threadIdx.x + blockIdx.x*blockDim.x; 
   if (i >= NCHAN*2) return;
   if (i >= NCHAN) // advance pointer to next polarization
   {
-    fft_out += ntime*NCHAN;
+    fft_out += FFTS_PER_SEG*NCHAN;
     bp += NCHAN;
     i -= NCHAN;
   }
@@ -2077,12 +2116,12 @@ __global__ void detect_and_normalize2 (cufftComplex *fft_out, cufftReal* bp,
   // initialize bandpass to mean of first block
   float bp_l = bp[i];
   if (0. == bp_l) {
-    for (int j = i; j < ntime*NCHAN; j+= NCHAN)
+    for (int j = i; j < FFTS_PER_SEG*NCHAN; j+= NCHAN)
       bp_l += fft_out[j].x*fft_out[j].x + fft_out[j].y*fft_out[j].y;
-    bp_l /= ntime;
+    bp_l /= FFTS_PER_SEG;
   }
 
-  for (int j = i; j < ntime*NCHAN; j+= NCHAN)
+  for (int j = i; j < FFTS_PER_SEG*NCHAN; j+= NCHAN)
   {
     // detect
     float pow = fft_out[j].x*fft_out[j].x + fft_out[j].y*fft_out[j].y;
@@ -2100,14 +2139,14 @@ __global__ void detect_and_normalize2 (cufftComplex *fft_out, cufftReal* bp,
   bp[i] = bp_l;
 }
 
-__global__ void detect_and_normalize3 (cufftComplex *fft_out, cufftReal* kur_weights_dev, cufftReal* bp, float scale, size_t ntime)
+__global__ void detect_and_normalize3 (cufftComplex *fft_out, cufftReal* kur_weights_dev, cufftReal* bp, float scale)
 {
   int i = threadIdx.x + blockIdx.x*blockDim.x; 
   if (i >= NCHAN*2) return;
   if (i >= NCHAN) // advance pointer to next polarization
   {
-    fft_out += ntime*NCHAN;
-    kur_weights_dev += ntime;
+    fft_out += FFTS_PER_SEG*NCHAN;
+    kur_weights_dev += FFTS_PER_SEG;
     bp += NCHAN;
     i -= NCHAN;
   }
@@ -2116,7 +2155,7 @@ __global__ void detect_and_normalize3 (cufftComplex *fft_out, cufftReal* kur_wei
   float bp_l = bp[i];
   if (0. == bp_l) {
     int good_samples = 0;
-    for (int j = i, time_idx=0; j < ntime*NCHAN; j+= NCHAN,time_idx++) {
+    for (int j = i, time_idx=0; j < FFTS_PER_SEG*NCHAN; j+= NCHAN,time_idx++) {
       float w = kur_weights_dev[time_idx];
       if (0.==w)
         continue;
@@ -2132,7 +2171,7 @@ __global__ void detect_and_normalize3 (cufftComplex *fft_out, cufftReal* kur_wei
       bp_l /= good_samples;
   }
 
-  for (int j = i, time_idx=0; j < ntime*NCHAN; j+= NCHAN,time_idx++)
+  for (int j = i, time_idx=0; j < FFTS_PER_SEG*NCHAN; j+= NCHAN,time_idx++)
   {
     // detect
     //float w = kur_weights_dev[time_idx]*kur_weights_dev[time_idx];
