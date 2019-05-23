@@ -67,8 +67,8 @@ __global__ void apply_kurtosis_fake (cufftReal *, cufftReal *, cufftReal *, cuff
 //
 __global__ void set_frb_delays (float*, float);
 __global__ void inject_frb ( cufftComplex *, float* , int , float , float );
-__global__ void detect_and_normalize2 (cufftComplex *, cufftReal*, float, size_t);
-__global__ void detect_and_normalize3 (cufftComplex *, cufftReal*, cufftReal*, float, size_t);
+__global__ void detect_and_normalize2 (cufftComplex *, cufftReal*, float);
+__global__ void detect_and_normalize3 (cufftComplex *, cufftReal*, cufftReal*, float);
 __global__ void histogram ( unsigned char *, unsigned int*, size_t);
 __global__ void pscrunch (cufftComplex *, size_t);
 __global__ void pscrunch_weights (cufftComplex *, cufftReal*, size_t);

@@ -18,23 +18,6 @@
 
 #define MSGMAXSIZE 8192
 
-//Multicast ports
-#define MULTI_OBSINFO_PORT 53001
-#define MULTI_ANTPROP_PORT 53000
-#define MULTI_ALERT_PORT 20011
-#define MULTI_TEST_PORT 53901
-
-//Multicast group IPs
-char testgrp[] = "239.199.3.2";
-char obsinfogrp[] = "239.192.3.2";
-char antpropgrp[] = "239.192.3.1";
-char alertgrp[] = "239.192.2.3";
-char vlitegrp[] = "224.3.29.71";
-
-int mc_reader_port = 20000;
-int mc_writer_port = 20001;
-int mc_info_port = 20002;
-
 // for signal handling and graceful termination
 static volatile int keep_running = 1;
 static volatile int signal_received = 0;
@@ -85,7 +68,7 @@ void mc_send(const char *group, int port, const char *message,
   if (MulticastSend (group, port, message, length) < 0)
     multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
 }
-    
+
 
 int main(int argc, char** argv)
 {
@@ -168,7 +151,7 @@ int main(int argc, char** argv)
   const char cmdstart[] = {CMD_START};
 
   fd_set readfds;
-  int obsinfosock, antpropsock, alertsock, maxnsock = 0;
+  int maxnsock = 0;
   //int ant_on_src = 0;
   int recording = 0;
 
@@ -178,7 +161,6 @@ int main(int argc, char** argv)
   AntPropDocument last_antprop; // keep a copy of antenna properties
 
   struct timespec ts_500ms = get_ms_ts (500);
-  struct timespec ts_100ms = get_ms_ts (100);
   struct timespec ts_10ms = get_ms_ts (10);
 
   char scaninfofile[128];
@@ -208,49 +190,14 @@ int main(int argc, char** argv)
   }
   //
 
-  //connect to VLA obsinfo multicast
-  obsinfosock = openMultiCastSocket (obsinfogrp, MULTI_OBSINFO_PORT);
-  if (obsinfosock < 0) {
-    multilog (log, LOG_ERR, "Failed to open Observation multicast; openMultiCastSocket = %d\n",obsinfosock);
-    exit (EXIT_FAILURE);
-  }
-  else {
-    multilog (log, LOG_INFO, "Obsinfo socket: %d\n",obsinfosock);
-    if(obsinfosock > maxnsock)
-      maxnsock = obsinfosock;
-  }
+  //connect to VLA multicast sockets
+  int obsinfosock = open_mc_socket (mc_obsinfogrp, MULTI_OBSINFO_PORT,
+      "Observation Info", &maxnsock, log);
+  int antpropsock = open_mc_socket (mc_antpropgrp, MULTI_ANTPROP_PORT,
+      "Antenna Properties", &maxnsock, log);
+  int alertsock = open_mc_socket (mc_alertgrp, MULTI_ALERT_PORT,
+      "VLA ALerts", &maxnsock, log);
 
-  //connect to VLA antprop multicast
-  antpropsock = openMultiCastSocket (antpropgrp, MULTI_ANTPROP_PORT);
-  if (antpropsock < 0) {
-    multilog (log, LOG_ERR, "Failed to open Antprop multicast; openMultiCastSocket = %d\n",antpropsock);
-    exit (EXIT_FAILURE);
-  }
-  else {
-    multilog (log, LOG_INFO, "Antprop socket: %d\n",antpropsock);
-    if (antpropsock > maxnsock)
-      maxnsock = antpropsock;
-  }
-
-  //connect to VLA alert multicast
-  alertsock = openMultiCastSocket (alertgrp, MULTI_ALERT_PORT);
-  if (alertsock < 0) {
-    multilog (log, LOG_ERR,"Failed to open Alert multicast; openMultiCastSocket = %d\n",alertsock);
-    exit (EXIT_FAILURE);
-  }
-  else {
-    multilog (log, LOG_INFO, "Alert socket: %d\n",alertsock);
-    if (alertsock > maxnsock)
-      maxnsock = alertsock;
-  }
-
-  /*
-  //Open event log
-  if ((efd = fopen (eventlogfile, "a")) == NULL) {
-    multilog (log, LOG_ERR, "Messenger: Could not open event log file %s for writing.\n",eventlogfile);
-    exit (EXIT_FAILURE);
-  }
-  */
 
   while (keep_running) {
     /* From Walter: The antprop message comes whenever a new scheduling 
@@ -316,8 +263,8 @@ int main(int argc, char** argv)
           if (strcasecmp (od->name,"FINISH") == 0)
           {
             multilog (log, LOG_INFO, "sending STOP command\n");
-            mc_send (vlitegrp,mc_reader_port,cmdstop,1,log);
-            mc_send (vlitegrp,mc_writer_port,cmdstop,1,log);
+            mc_send (mc_vlitegrp,MC_READER_PORT,cmdstop,1,log);
+            mc_send (mc_vlitegrp,MC_WRITER_PORT,cmdstop,1,log);
             recording = 0;
             // TEMP -- see if this sleep is helpful
             nanosleep (&ts_500ms, NULL);
@@ -358,7 +305,7 @@ int main(int argc, char** argv)
               }
 
               multilog (log, LOG_INFO, "sending STOP command\n");
-              mc_send (vlitegrp,mc_writer_port,cmdstop,1,log);
+              mc_send (mc_vlitegrp,MC_WRITER_PORT,cmdstop,1,log);
               // this is empirical, but seems to be long enough to allow
               // messages to propagate before sending the next command;
               // can also avoid this by altering wait_for_cmd to not discard
@@ -372,9 +319,9 @@ int main(int argc, char** argv)
             time (&start_integ);
             multilog (log, LOG_INFO,"sending START command\n");
 
-            mc_send (vlitegrp,mc_reader_port,cmdstart,1,log);
-            mc_send (vlitegrp,mc_writer_port,cmdstart,1,log);
-            mc_send (vlitegrp,mc_info_port,(char*)(od),sizeof(ObservationDocument),log);
+            mc_send (mc_vlitegrp,MC_READER_PORT,cmdstart,1,log);
+            mc_send (mc_vlitegrp,MC_WRITER_PORT,cmdstart,1,log);
+            mc_send (mc_vlitegrp,MC_INFO_PORT,(char*)(od),sizeof(ObservationDocument),log);
             multilog (log, LOG_INFO,"sent START command\n");
             fflush (stderr); fflush (stdout);
             nanosleep (&ts_10ms, NULL);
@@ -446,19 +393,19 @@ int main(int argc, char** argv)
         ObservationDocument dummy;
         fill_dummy_obs_doc (&dummy);
         multilog (log, LOG_INFO, "sending manual START command\n");
-        mc_send (vlitegrp,mc_reader_port,cmdstart,1,log);
-        mc_send (vlitegrp,mc_writer_port,cmdstart,1,log);
-        mc_send (vlitegrp,mc_info_port,(char *)(&dummy),sizeof(ObservationDocument),log);
+        mc_send (mc_vlitegrp,MC_READER_PORT,cmdstart,1,log);
+        mc_send (mc_vlitegrp,MC_WRITER_PORT,cmdstart,1,log);
+        mc_send (mc_vlitegrp,MC_INFO_PORT,(char *)(&dummy),sizeof(ObservationDocument),log);
       }
       else if (cmd == CMD_EVENT) {
         multilog (log, LOG_INFO, "sending manual EVENT command\n");
-        mc_send (vlitegrp,mc_reader_port,cmdstop,1,log);
-        mc_send (vlitegrp,mc_writer_port,cmdevent,1,log);
+        mc_send (mc_vlitegrp,MC_READER_PORT,cmdstop,1,log);
+        mc_send (mc_vlitegrp,MC_WRITER_PORT,cmdevent,1,log);
       }
       else if (cmd == CMD_STOP) {
         multilog (log, LOG_INFO, "sending STOP command\n");
-        mc_send (vlitegrp,mc_reader_port,cmdstop,1,log);
-        mc_send (vlitegrp,mc_writer_port,cmdstop,1,log);
+        mc_send (mc_vlitegrp,MC_READER_PORT,cmdstop,1,log);
+        mc_send (mc_vlitegrp,MC_WRITER_PORT,cmdstop,1,log);
       }
       else if (cmd == CMD_QUIT) {
         multilog (log, LOG_INFO, "breaking from main loop\n");
@@ -476,10 +423,10 @@ int main(int argc, char** argv)
   fclose (logfile_fp);
 
   // shut down readers
-  mc_send (vlitegrp,mc_reader_port,cmdquit,1,log);
+  mc_send (mc_vlitegrp,MC_READER_PORT,cmdquit,1,log);
   // run writers for a little longer to avoid readers hanging
   sleep (2);
-  mc_send (vlitegrp,mc_writer_port,cmdquit,1,log);
+  mc_send (mc_vlitegrp,MC_WRITER_PORT,cmdquit,1,log);
 
   /* Removed 4/4/2019 by MTK
   // clean up configuration memory

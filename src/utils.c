@@ -18,7 +18,8 @@
 #include <pwd.h>
 
 #include "utils.h"
-#include "def.h"
+//#include "def.h"
+#include "multicast.h"
 
 
 //Adapted from http://www.cs.rutgers.edu/~pxk/417/notes/sockets/demo-03.html
@@ -508,6 +509,13 @@ time_t vdif_to_unixepoch (vdif_header* vdhdr)
   return epoch_seconds-local_offset;
 }
 
+double vdif_to_dunixepoch (vdif_header* vdhdr, time_t* seconds)
+{
+  time_t second = vdif_to_unixepoch (vdhdr);
+  if (seconds != NULL) *seconds = second;
+  return second + (1./MAXFRAMENUM)*vdhdr->frame;
+}
+
 int dump_check_name (char* src, char* did)
 {
   return 0;
@@ -604,3 +612,17 @@ void* buffer_dump (void* mem)
   return NULL;
 }
 
+int open_mc_socket (const char* group, int port, char* name, int* maxnsock, multilog_t* log)
+{
+  int sock = openMultiCastSocket (group, port);
+  if (sock < 0) {
+    multilog (log, LOG_ERR, 
+        "Failed to open %s multicast socket on %s:%d.\n",name,group,port);
+    exit (EXIT_FAILURE);
+  }
+  multilog (log, LOG_INFO, "%s socket: %d\n",name,sock);
+  if ((maxnsock != NULL) && (sock > *maxnsock))
+    *maxnsock = sock;
+  return sock;
+}
+    

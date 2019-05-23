@@ -11,6 +11,21 @@ TRIGGER_PORT = 27556
 import socket
 from collections import deque,defaultdict
 from candidate import Candidate,coincidence
+import ctypes
+import struct
+
+import time
+import calendar
+
+# a ctypes implementation for reference
+#class Trigger(ctypes.BigEndianStructure):
+#    _pack = 1
+#    _fields_ = [("t0",ctypes.c_int64),("t1",ctypes.c_int64), ("meta", ctypes.c_char*128)]
+#t0c = ctypes.c_int64(t0)
+#t1c = ctypes.c_int64(t1)
+#meta = ctypes.create_string_buffer(s,size=128)
+#t = Trigger(t0,t1,s)
+#print ctypes.sizeof(t)
 
 # combine events overlapping (multiple triggers) provided their total
 # length doesn't exceed MAX_DUMP s
@@ -26,7 +41,7 @@ def make_server (nmax=18):
     s.listen (nmax)
     return s
 
-def trigger(all_cands,snthresh=8,minbeam=2,wmax=0.01,dmmin=70):
+def trigger(all_cands,snthresh=8,minbeam=3,wmax=0.01,dmmin=70):
     """ Go through coincidenced beams and determine if there is an event
     satisfying the trigger criteria.
     """
@@ -34,7 +49,7 @@ def trigger(all_cands,snthresh=8,minbeam=2,wmax=0.01,dmmin=70):
     coincident_count = 0
     good_count = 0
     for cand in all_cands:
-        nbeam = cand.beam_mask.sum() 
+        nbeam = (cand.beam_mask>0).sum() 
         coincident_count += nbeam > 1
         c1 = nbeam >= minbeam
         c2 = cand.width < wmax
@@ -49,6 +64,18 @@ def trigger(all_cands,snthresh=8,minbeam=2,wmax=0.01,dmmin=70):
     print 'len(triggers)=%d'%(len(triggers))
 
     return triggers
+
+trigger_group = ('224.3.29.71',20003)
+
+def send_trigger(trigger_struct):
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(0.2)
+    ttl = struct.pack('b', 1)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
+    sock.sendto(trigger_struct,trigger_group)
+    #sock.shutdown(socket.SHUT_RDWR)
+    sock.close()
 
 if __name__ == '__main__':
 
@@ -69,13 +96,14 @@ if __name__ == '__main__':
         lines = filter(lambda l: len(l) > 0,
             map(str.strip,''.join(payload).split('\n')))
         output.write('\n'.join(lines))
-        print lines[0]
+        print 'Received %d new candidates.'%(len(lines)-1)
+        #print lines[0]
         # add this temporarily, to allow reconstruction of candidates
         # that are received
-        for line in lines[1:]:
-            print line
-        for line in lines[1:]:
-            print Candidate(None,line)
+        #for line in lines[1:]:
+        #    print line
+        #for line in lines[1:]:
+        #    print Candidate(None,line)
 
         # do I want empty entries?
         if len(lines) == 1:
@@ -108,7 +136,7 @@ if __name__ == '__main__':
 
         # get triggers
         sent_triggers = utc_sent_triggers[utc]
-        current_triggers = trigger(all_cands,minbeam=2)
+        current_triggers = trigger(all_cands,snthresh=6.0,minbeam=4,wmax=0.15,dmmin=75)
         new_triggers = set(current_triggers).difference(sent_triggers)
         print 'new_triggers len: ',len(new_triggers) # DEBUG
 
@@ -129,10 +157,18 @@ if __name__ == '__main__':
                 i1 = max(i1,trig.i1)
 
         # send a trigger based on active_utc, i0, i1        
-        dump_offs = int(i1*trig.tsamp)
-        dump_len = int( (i1-i0)*trig.tsamp ) + 1
+        dump_offs = i1*trig.tsamp
+        dump_len = (i1-i0)*trig.tsamp
 
         # TODO -- it would be nice to print out the latency between the candidate peak time
         # and the time the trigger is sent; it is 40-50 s with current gulp settings
         print 'Sending trigger for UTC %s with offset %d and length %d.'%(utc,dump_offs,dump_len)
+        s = "Trigger at UTC %s + %d"%(utc,dump_offs)
+        t = time.strptime(utc,'%Y-%m-%d-%H:%M:%S')
+        # add in 100ms buffer in case heimdall isn't perfectly accurate!
+        t0 = calendar.timegm(t) + dump_offs - 0.1
+        t1 = t0 + dump_len + 0.2
+        print 't0=',t0,' t1=',t1
+        t = struct.pack('dd128s',t0,t1,s)
+        send_trigger(t)
 

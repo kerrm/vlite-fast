@@ -92,21 +92,23 @@ int check_name (char* src)
   return (strstr (src, "B0329+54") != NULL ||
           strstr (src, "J0332+54") != NULL || 
           strstr (src, "B0531+21") != NULL || 
+          strstr (src, "J0534+22") != NULL || 
+          strstr (src, "B2319+60") != NULL || 
+          strstr (src, "J2321+6024") != NULL || 
           strstr (src, "B0833-45") != NULL ||
-          strstr (src, "B0950+08") != NULL || 
-          strstr (src, "B1133+16") != NULL ||
-          strstr (src, "B1237+25") != NULL ||
-          strstr (src, "B1642-03") != NULL ||
-          strstr (src, "B1749-28") != NULL || 
-          strstr (src, "B1929+10") != NULL || 
+          strstr (src, "J0835-45") != NULL ||
+          //strstr (src, "B0950+08") != NULL || 
+          //strstr (src, "B1133+16") != NULL ||
+          //strstr (src, "B1237+25") != NULL ||
+          //strstr (src, "B1642-03") != NULL ||
+          //strstr (src, "B1749-28") != NULL || 
+          //strstr (src, "B1929+10") != NULL || 
           //strstr (src, "3C147") != NULL || 
           //strstr (src, "3C48") != NULL || 
-          strstr (src, "J0341+5711") != NULL ||
-          strstr (src, "J1713+0747") != NULL ||
+          //strstr (src, "J0341+5711") != NULL ||
+          //strstr (src, "J1713+0747") != NULL ||
           strstr (src, "R2") != NULL ||
-          strstr (src, "R3") != NULL ||
-          //strstr (src, "3C345") != NULL ||
-          strstr (src, "J1909-3744") != NULL);
+          strstr (src, "R3") != NULL);
 
 }
 
