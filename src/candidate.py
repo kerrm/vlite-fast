@@ -21,6 +21,7 @@ class Candidate(object):
         except:
             self.tsamp = 1./1280
         self.width = float(self.i1-self.i0)*self.tsamp
+        self.sent_trigger = False
 
     def get_block(self,wmult=1,include_DM=True):
         fr = FilReader(self.fil)
@@ -45,15 +46,25 @@ class Candidate(object):
             kernel = [kernel]
         return fftconvolve(block,kernel,mode='same')
 
-    def overlap(self,other,delta_dm=0.1):
+    def overlap(self,other,delta_dm=0.1,delta_w=3):
+        """ Return true if DMs are close enough, the candidates overlap in time,
+            and their widths aren't too discrepant.
+        """
         if abs(self.dm/other.dm-1) > delta_dm:
             return 0
+        w1,w2 = self.width,other.width
+        if (w1 < w2):
+            if w2/w1 > delta_w:
+                return 0
+        else:
+            if w1/w2 > delta_w:
+                return 0
         if self.i0 < other.i0:
             return (other.i0 < self.i1)
         return self.i0 < other.i1
 
     def __str__(self):
-        return 'i0=%d i1=%d w=%.2f sn=%.2f dm=%.2f'%(self.i0,self.i1,self.width*1000,self.sn,self.dm)
+        return 'i0=%06d i1=%06d w=%3.2f sn=%3.2f dm=%3.2f'%(self.i0,self.i1,self.width*1000,self.sn,self.dm)
 
 def coincidence (all_cands,delta_dm=0.1):
 

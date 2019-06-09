@@ -7,9 +7,11 @@ PARSE_HEADERS = efaults.h  eop.h  executor.h  options.h  vlaant.h  vlite_xml.h m
 
 #F77 = gfortran -std=legacy -ffixed-line-length-none 
 CC = gcc
-NVCC = nvcc
+#NVCC = nvcc
+NVCC = /usr/cuda-9.2.88/bin/nvcc
 CUDA_ARCH = -gencode arch=compute_35,code=sm_35 -gencode arch=compute_52,code=sm_52 -gencode arch=compute_61,code=sm_61
-CUDA_DIR = /usr/cuda
+#CUDA_DIR = /usr/cuda
+CUDA_DIR = /usr/cuda-9.2.88
 PACKAGE_DIR = ../..
 
 all: process_baseband genbase readbase messenger writer
@@ -20,9 +22,11 @@ install:
 	cp -p readbase ${PACKAGE_DIR}/bin
 	cp -p messenger ${PACKAGE_DIR}/bin
 	cp -p writer ${PACKAGE_DIR}/bin
+	rsync -avz writer ${PACKAGE_DIR}/bin/dada_db vd12:/mnt/ssd/bin &> /dev/null
+	ssh vd12ops "sudo setcap cap_net_admin,cap_net_raw=eip /mnt/ssd/bin/writer && sudo setcap cap_ipc_lock=eip /mnt/ssd/bin/dada_db" &> /dev/null
 
-process_baseband: process_baseband.o util.o cuda_util.o utils.o
-	$(NVCC) -o $@ $@.o utils.o util.o cuda_util.o -lcufft -lcurand -L${PACKAGE_DIR}/lib -lvdifio -lpsrdada
+process_baseband: process_baseband.o util.o cuda_util.o utils.o multicast.o
+	$(NVCC) -o $@ $@.o utils.o util.o cuda_util.o multicast.o -lcufft -lcurand -L${PACKAGE_DIR}/lib -lvdifio -lpsrdada
 	chmod a+rx $@
 
 process_baseband.o: process_baseband.cu process_baseband.h def.h
@@ -43,9 +47,10 @@ messenger:	messenger.c def.h utils.o $(PARSE_FILES)
 	gcc -o $@ messenger.o utils.o $(PARSE_OBJ) -L${PACKAGE_DIR}/lib -lexpat -lpsrdada
 	chmod a+rx $@
 
-writer:	writer.c def.h utils.o
+writer:	writer.c def.h utils.o multicast.o
 	gcc -g -O2 -Wall -std=gnu99 -pthread -c writer.c -I${PACKAGE_DIR}/include -I$(INCDIFXMESSAGE)
-	gcc -o $@ writer.o utils.o -pthread -L${PACKAGE_DIR}/lib -lpsrdada -lvdifio
+	#gcc -o $@ writer.o utils.o multicast.o -pthread -L${PACKAGE_DIR}/lib -lpsrdada -lvdifio
+	gcc -o $@ writer.o utils.o multicast.o -pthread -L${PACKAGE_DIR}/lib -lpsrdada -lvdifio -Wl,-rpath /home/vlite-master/mtk/lib
 	chmod a+rx $@
 
 util.o: util.h util.c

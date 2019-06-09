@@ -18,7 +18,8 @@
 #include <pwd.h>
 
 #include "utils.h"
-#include "def.h"
+//#include "def.h"
+#include "multicast.h"
 
 
 //Adapted from http://www.cs.rutgers.edu/~pxk/417/notes/sockets/demo-03.html
@@ -102,13 +103,19 @@ int serve (int port, Connection* c) {
  */
 int wait_for_cmd (Connection* c, FILE* outstream) {
 
+  return check_for_cmd (c->rqst, c->buf, MAXINBUFSIZE, outstream);
+
+}
+
+
+int check_for_cmd (int socket, char* buf, int maxlen, FILE* outstream) {
+
   if (NULL == outstream) outstream = stderr;
 
-  fprintf (outstream, "in wait_for_cmd\n");
-
-  int nbytes = read(c->rqst,c->buf,MAXINBUFSIZE);
-  c->buf[nbytes] = '\0';
-  fprintf (outstream, "wait_for_cmd: read %d bytes: %.*s\n",nbytes,nbytes,c->buf);
+  int nbytes = read (socket,buf,maxlen);
+  if (nbytes < 0) return CMD_NONE;
+  buf[nbytes] = '\0';
+  fprintf (outstream, "wait_for_cmd: read %d bytes: %.*s\n",nbytes,nbytes,buf);
   
   if(nbytes == 0) {
     fprintf (outstream,
@@ -121,15 +128,15 @@ int wait_for_cmd (Connection* c, FILE* outstream) {
   // MTK -- I assume note above is from telnet; direct commands sent over
   // socket will have fewer, so changed == to <=.
   if(nbytes <= 3) {
-      fprintf (outstream, "wait_for_cmd: Triggered with %c.\n",c->buf[0]);
-    switch(c->buf[0]) {
+      fprintf (outstream, "wait_for_cmd: Triggered with %c.\n",buf[0]);
+    switch(buf[0]) {
     case CMD_START: return CMD_START;
     case CMD_STOP: return CMD_STOP;
     case CMD_QUIT: return CMD_QUIT;
     case CMD_EVENT: return CMD_EVENT;
     default: {
       fprintf (outstream, 
-          "wait_for_cmd: Unrecognized command %c, defaulting to CMD_NONE.\n",c->buf[0]);
+          "wait_for_cmd: Unrecognized command %c, defaulting to CMD_NONE.\n",buf[0]);
       return CMD_NONE;
     }
     }
@@ -137,7 +144,7 @@ int wait_for_cmd (Connection* c, FILE* outstream) {
   //Backlogged commands: return the most recent non-event command.
   else {
     for(int ii=nbytes-1; ii>=0; ii--) {
-      switch(c->buf[ii]) {
+      switch(buf[ii]) {
       case CMD_START: return CMD_START;
       case CMD_STOP: return CMD_STOP;
       case CMD_QUIT: return CMD_QUIT;
@@ -145,7 +152,7 @@ int wait_for_cmd (Connection* c, FILE* outstream) {
 	//case '\0': continue;
       default: {
 	fprintf (outstream, 
-      "wait_for_cmd: Unrecognized command %c, defaulting to CMD_NONE.\n",c->buf[ii]);
+      "wait_for_cmd: Unrecognized command %c, defaulting to CMD_NONE.\n",buf[ii]);
 	return CMD_NONE;
       }
       }
@@ -156,6 +163,57 @@ int wait_for_cmd (Connection* c, FILE* outstream) {
   }
 }
 
+/*
+ * Test for a specific command by searching through all queued commands
+ * available on the socket buffer.
+*/
+int test_for_cmd (int testcmd, int socket, char* buf, int maxlen, FILE* outstream) {
+
+  int nbytes = read (socket,buf,maxlen);
+  if (nbytes <= 0) return 0;
+  for (int ib = 0; ib < nbytes; ib++) {
+    if (buf[ib] == testcmd) 
+      return 1;
+  }
+  return 0;
+}
+
+void get_cmds (int* cmds, int socket, char* buf, int maxlen, FILE* outstream) {
+
+  for (int i = 0; i < 5; ++i)
+    cmds[i] = 0;
+
+  int nbytes = read (socket,buf,maxlen);
+  if (nbytes <= 0) return;
+
+  for (int ib = 0; ib < nbytes; ib++) {
+    if (buf[ib] == CMD_START)
+    {
+      cmds[0] = 1;
+      continue;
+    }
+    if (buf[ib] == CMD_STOP)
+    {
+      cmds[1] = 1;
+      continue;
+    }
+    if (buf[ib] == CMD_QUIT)
+    {
+      cmds[2] = 1;
+      continue;
+    }
+    if (buf[ib] == CMD_EVENT)
+    {
+      cmds[3] = 1;
+      continue;
+    }
+    if (buf[ib] == CMD_NONE)
+    {
+      cmds[4] = 1;
+      continue;
+    }
+  }
+}
 /*
   Input: pointer to initialized data block, opened writable file descriptor
   
@@ -451,8 +509,16 @@ time_t vdif_to_unixepoch (vdif_header* vdhdr)
   return epoch_seconds-local_offset;
 }
 
+double vdif_to_dunixepoch (vdif_header* vdhdr, time_t* seconds)
+{
+  time_t second = vdif_to_unixepoch (vdhdr);
+  if (seconds != NULL) *seconds = second;
+  return second + (1./MAXFRAMENUM)*vdhdr->frame;
+}
+
 int dump_check_name (char* src, char* did)
 {
+  return 0;
   static int cnt_3C147 = 0;
   static int cnt_3C48 = 0;
   //static int cnt_3C273 = 0;
@@ -487,6 +553,7 @@ int dump_check_name (char* src, char* did)
 
 int voltage_check_name (char* src, char* did)
 {
+  return 0;
   return (strstr (src, "B0329+54") != NULL ||
           strstr (src, "J0332+54") != NULL || 
           strstr (src, "3C147") != NULL || 
@@ -498,6 +565,12 @@ void* buffer_dump (void* mem)
 {
   threadio_t* tio = (threadio_t*) mem;
   tio->status = -1;
+
+  if (tio->ms_delay > 0)
+  {
+    struct timespec ts_ms = get_ms_ts (tio->ms_delay);
+    nanosleep (&ts_ms,NULL);
+  }
   
   // malloc enough memory for local copy
   char* mybuff = malloc (tio->bufsz);
@@ -539,3 +612,17 @@ void* buffer_dump (void* mem)
   return NULL;
 }
 
+int open_mc_socket (const char* group, int port, char* name, int* maxnsock, multilog_t* log)
+{
+  int sock = openMultiCastSocket (group, port);
+  if (sock < 0) {
+    multilog (log, LOG_ERR, 
+        "Failed to open %s multicast socket on %s:%d.\n",name,group,port);
+    exit (EXIT_FAILURE);
+  }
+  multilog (log, LOG_INFO, "%s socket: %d\n",name,sock);
+  if ((maxnsock != NULL) && (sock > *maxnsock))
+    *maxnsock = sock;
+  return sock;
+}
+    

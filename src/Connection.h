@@ -8,9 +8,9 @@
 #define MAXINBUFSIZE 1024
 #define MAXHOSTNAME 128
 
-#define READER_SERVICE_PORT 30001
-#define WRITER_SERVICE_PORT 30101
-#define WRITER_INFO_PORT 30201
+//#define READER_SERVICE_PORT 30001
+//#define WRITER_SERVICE_PORT 30101
+//#define WRITER_INFO_PORT 30201
 
 typedef struct {
   int svc;        /* listening socket providing service */

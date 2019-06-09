@@ -1,10 +1,5 @@
-/*
-#define CMD_START 101
-#define CMD_STOP 102
-#define CMD_QUIT 103
-#define CMD_EVENT 104
-#define CMD_NONE 0
-*/
+#ifndef __DEF_H__
+#define __DEF_H__
 
 #define CMD_START 'S'
 #define CMD_STOP  'C'
@@ -26,6 +21,13 @@
 
 #define EVENTDIR "/mnt/ssd/dumps"
 #define LOGDIR "/home/vlite-master/mtk/logs"
-#define DATADIR "/home/vlite-master/mtk/data"
+//#define DATADIR "/home/vlite-master/mtk/data"
+#define DATADIR "/mnt/ssd/fildata"
+#define CANDDIR "/mnt/ssd/cands"
 #define OBSINFODIR "/home/vlite-master/mtk/logs/obsinfo-antprop"
 
+
+#define MAX_THREADIOS 100
+#define MAX_TRIGGERS 10
+
+#endif

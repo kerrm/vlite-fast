@@ -3,9 +3,10 @@
 
 #include <stdio.h>
 #include "Connection.h"
-//#include "def.h"
 #include "ipcio.h"
 #include "vdifio.h"
+#include "multilog.h"
+#include "def.h"
 
 #ifdef _cplusplus
 extern "C" {
@@ -30,12 +31,24 @@ typedef struct {
   uint64_t bufsz;     // size of buffer in bytes
   char fname[256];    // name of output file
   int status;         // status: -1 == working, 0 == success, >0 == error
+  int ms_delay;       // milliseconds to delay beginning of execution
   pthread_t tid;      // the thread context
 
 } threadio_t;
 
+typedef struct {
+  
+  double t0;          // start of trigger window [seconds since Unix epoch]
+  double t1;          // end of trigger window [seconds since Unix epoch]
+  char meta[128];     // ancillary information like source name, ...
+
+} trigger_t;
+
 int serve(int port, Connection* c);
 int wait_for_cmd(Connection* c, FILE* fp);
+int check_for_cmd (int socket, char* buf, int maxlen, FILE* outstream);
+int test_for_cmd (int testcmd, int socket, char* buf, int maxlen, FILE* outstream);
+void get_cmds (int* cmds, int socket, char* buf, int maxlen, FILE* outstream);
 void event_to_file(const ipcio_t* db, FILE* evfd);
 int conn(Connection *c);
 void disconn(Connection *c);
@@ -45,9 +58,11 @@ VFASTConfig** parse_vfast_config (char* config_file, int* nconfig);
 struct timespec get_ms_ts (int ms);
 char* print_vfast_config (VFASTConfig* vc, FILE* fp);
 time_t vdif_to_unixepoch (vdif_header*);
+double vdif_to_dunixepoch (vdif_header* vdhdr, time_t* seconds);
 int dump_check_name (char*,char*);
 int voltage_check_name (char*,char*);
 void* buffer_dump (void* mem);
+int open_mc_socket (const char* group, int port, char* name, int* maxnsock, multilog_t* log);
 
 #ifdef _cplusplus
 }

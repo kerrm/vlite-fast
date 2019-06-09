@@ -25,6 +25,7 @@ extern "C" {
 #include "utils.h"
 #include "def.h"
 #include "executor.h"
+#include "multicast.h"
 }
 
 static volatile int NBIT = 2;
@@ -36,16 +37,18 @@ void usage ()
   fprintf (stdout,"Usage: process [options]\n"
 	  "-k hexadecimal shared memory key for input (default: 40)\n"
 	  "-K hexadecimal shared memory key for output (default: 0=disabled)\n"
-	  "-p listening port number (default: %zu; if 0, disable)\n"
+//	  "-p listening port number (default: %zu; if 0, disable)\n"
 	  "-o print logging messages to stdout (as well as logfile)\n"
 	  "-w output filterbank data (0=no sources, 1=listed sources, 2=all sources [def])\n"
 	  "-b reduce output to b bits (2 [def], 4, and 8 are supported))\n"
 	  "-P number of output polarizations (1=AA+BB, 2=AA,BB; 4 not implemented)\n"
 	  "-r RFI-excision mode (0=no excision, 1=only excision, 2=[default]write both data sets)\n"
+	  "-i Inject an FRB at DM=80 periodicially in the output data.\n"
     "-s process a single observation, then quit (used for debugging)\n"
-    "-g run on specified GPU\n"
+    "-p process a single recorded observation, then quit (used for profiling))\n"
+    "-g run on specified GPU\n");
 	  //"-m retain MUOS band\n"
-	  ,(uint64_t)READER_SERVICE_PORT);
+//	  ,(uint64_t)READER_SERVICE_PORT);
 }
 
 void exit_handler (void) {
@@ -73,6 +76,11 @@ void change_extension (const char* in, char* out, const char* oldext, const char
   else
     snprintf (substr, 256-strlen(out)-1, newext);  
 }
+
+/*
+TODO generalize above to allow changing a substring, particularly to change
+"muos" to "muos_kur" and then make this the default for output.
+*/
 
 // TODO -- check that this is consistent with sigproc
 int write_psrdada_header (dada_hdu_t* hdu, char* inchdr, vdif_header* vdhdr, int npol, char* fb_file)
@@ -141,23 +149,23 @@ int write_psrdada_header (dada_hdu_t* hdu, char* inchdr, vdif_header* vdhdr, int
 
 int  clear_psrdada_buffer (dada_hdu_t* hdu)
 {
-  //fprintf (stderr, "locking read");
+  fprintf (stderr, "locking read");
   dadacheck (dada_hdu_lock_read (hdu));
   uint64_t hdr_size = 0;
-  //fprintf (stderr, "clearing headers");
+  fprintf (stderr, "clearing headers");
   for (uint64_t i = 0; i < ipcbuf_get_nfull (hdu->header_block); ++i)
   {
     ipcbuf_get_next_read (hdu->header_block,&hdr_size);
     dadacheck (ipcbuf_mark_cleared (hdu->header_block));
   }
   ipcbuf_t* db = (ipcbuf_t*)hdu->data_block;
-  //fprintf (stderr, "clearing datas");
+  fprintf (stderr, "clearing datas");
   for (uint64_t i = 0; i < ipcbuf_get_nfull (db); ++i)
   {
     ipcbuf_get_next_read (db,&hdr_size);
     dadacheck (ipcbuf_mark_cleared (db));
   }
-  //fprintf (stderr, "cleared data\n");
+  fprintf (stderr, "cleared data\n");
   dadacheck (dada_hdu_unlock_read (hdu));
   return 0;
 }
@@ -237,17 +245,19 @@ int main (int argc, char *argv[])
   int exit_status = EXIT_SUCCESS;
   key_t key_in = 0x40;
   key_t key_out = 0x0;
-  uint64_t port = READER_SERVICE_PORT;
+  //uint64_t port = READER_SERVICE_PORT;
   int stdout_output = 0;
   int write_fb = 2;
   int npol = 1;
+  int do_inject_frb = 0;
   int RFI_MODE=2;
   int major_skip = 0;
+  int profile_pass = 0;  
   int single_pass = 0;  
   int gpu_id = 0;
 
   int arg = 0;
-  while ((arg = getopt(argc, argv, "hk:K:p:omw:b:P:r:sg:")) != -1) {
+  while ((arg = getopt(argc, argv, "hik:K:omw:b:P:r:stg:")) != -1) {
 
     switch (arg) {
 
@@ -269,15 +279,21 @@ int main (int argc, char *argv[])
       }
       break;
 
+      /*
     case 'p':
       if (sscanf (optarg, "%zu", &port) != 1) {
         fprintf (stderr, "writer: could not parse port from %s\n", optarg);
         return -1;
       }
       break;
+      */
 
     case 'o':
       stdout_output = 1;
+      break;
+
+    case 'i':
+      do_inject_frb = 1;
       break;
 
     /*
@@ -329,6 +345,10 @@ int main (int argc, char *argv[])
 
     case 's':
       single_pass = 1;
+      break;
+
+    case 't':
+      profile_pass = 1;
       break;
 
     case 'g':
@@ -420,6 +440,8 @@ int main (int argc, char *argv[])
   // connect to output buffer (optional)
   dada_hdu_t* hdu_out[NOUTBUFF] = {NULL};
   FILE* heimdall_fp[NOUTBUFF] = {NULL};
+  FILE* scrubber_fp[NOUTBUFF] = {NULL};
+  FILE* rebuild_fp[NOUTBUFF] = {NULL};
   int buffer_ok[NOUTBUFF] = {0};
   int active_buffer = 0;
   if (key_out) {
@@ -460,8 +482,8 @@ int main (int argc, char *argv[])
 
   // voltage samples in a chunk, 2*VLITE_RATE/SEG_PER_SEC (both pols)
   size_t samps_per_chunk = 2*VLITE_RATE/SEG_PER_SEC;
-  // FFTs per processing chunk
-  int fft_per_chunk = samps_per_chunk / NFFT;
+  // FFTs per processing chunk (2 per pol)
+  int fft_per_chunk = 2*FFTS_PER_SEG;
 
   cufftHandle plan;
   cufftcheck (cufftPlan1d (&plan,NFFT,CUFFT_R2C,fft_per_chunk));
@@ -566,6 +588,28 @@ int main (int argc, char *argv[])
     cudacheck (cudaMemset (bp_kur_dev, 0, sizeof(cufftReal)*NCHAN*2));
   }
 
+  // memory for FRB injection
+  float* frb_delays_dev = NULL;
+  if (do_inject_frb)
+  {
+    cudacheck (cudaMalloc ((void**)&frb_delays_dev, sizeof(float)*NCHAN));
+    // DM of 80 fits almost exactly in 1s of data across the whole band
+    set_frb_delays <<< NCHAN/NTHREAD+1, NTHREAD >>> (frb_delays_dev, 80);
+    cudacheck (cudaGetLastError () );
+
+    /*
+    float* frb_delays_hst = NULL;
+    cudacheck (cudaMallocHost ((void**)&frb_delays_hst, sizeof(float)*NCHAN));
+    cudacheck (cudaMemcpy (
+
+          frb_delays_hst,frb_delays_dev,sizeof(float)*NCHAN,
+          cudaMemcpyDeviceToHost) );
+    for (int ichan=0; ichan < 6250; ichan += 100)
+      fprintf (stdout, "frb_delay %d = %.6f\n", ichan, frb_delays_hst[ichan]);
+    */
+  }
+
+
   #if PROFILE
   CUDA_PROFILE_STOP(start,stop,&alloc_time)
   #endif
@@ -581,6 +625,7 @@ int main (int argc, char *argv[])
   vdif_header* vdhdr = (vdif_header*) frame_buff;
   uint8_t* dat = (uint8_t*)(frame_buff + 32);
 
+  /*
   // connect to control socket
   Connection conn;
   conn.sockoptval = 1; //release port immediately after closing connection
@@ -593,11 +638,26 @@ int main (int argc, char *argv[])
     fcntl (conn.rqst, F_SETFL, O_NONBLOCK); // set up for polling
   }
   char cmd_buff[32];
+  */
+
+  // connect to multicast control socket
+  int mc_control_sock = 0;
+  char mc_control_buff[32];
+  mc_control_sock = openMultiCastSocket ("224.3.29.71", 20000);
+  if (mc_control_sock < 0) {
+    multilog (log, LOG_ERR, "Failed to open Observation multicast; openMultiCastSocket = %d\n",mc_control_sock);
+    exit (EXIT_FAILURE);
+  }
+  else
+    multilog (log, LOG_INFO, "Control socket: %d\n",mc_control_sock);
+  fcntl (mc_control_sock, F_SETFL, O_NONBLOCK); // set up for polling
+  int cmds[5] = {0,0,0,0,0};
 
   int quit = 0;
+  int inject_frb_now = 0;
 
   // TEMP for profiling
-  if (single_pass)
+  if (profile_pass)
   {
     char cmd[256];
     snprintf (cmd, 255, "/home/vlite-master/mtk/src/readbase /home/vlite-master/mtk/baseband/20150302_151845_B0329+54_ev_0005.out.uw"); 
@@ -612,6 +672,12 @@ int main (int argc, char *argv[])
 
   if (quit)
     break;
+
+  get_cmds (cmds, mc_control_sock, mc_control_buff, 32, logfile_fp);
+  if (cmds[2]) // CMD_QUIT
+    break;
+  if (!cmds[0]) // CMD_START
+    continue;
 
   fflush (logfile_fp);
   dadacheck (dada_hdu_lock_read (hdu_in) );
@@ -629,23 +695,15 @@ int main (int argc, char *argv[])
     // this could be an error condition, or it could be a result of 
     // shutting down the data acquisition system; check to see if a
     // CMD_QUIT has been issued in order to log the appropriate outcome
-    ssize_t npoll_bytes = 0;
-    if (port) npoll_bytes = read (conn.rqst, cmd_buff, 32);
-    if (npoll_bytes >  0) {
-      for (int ib = 0; ib < npoll_bytes; ib++) {
-        printf("Read command character %c.\n",cmd_buff[ib]);
-        if (cmd_buff[ib] == CMD_QUIT) {
-          multilog (log, LOG_INFO,
-              "Received CMD_QUIT, indicating data taking is ceasing.  Exiting.\n");
-          quit = 1;
-          break;
-        }
-      }
-      if (quit) break;
+
+    if (test_for_cmd (CMD_QUIT, mc_control_sock, mc_control_buff, 32, logfile_fp))
+      multilog (log, LOG_INFO, "Received CMD_QUIT, indicating data taking is ceasing.  Exiting.\n");
+    else
+    {
+      // did not receive CMD_QUIT, so this is an abnormal state
+      multilog (log, LOG_ERR, "PSRDADA read failed unexpectedly.  Terminating.\n");
+      exit_status = EXIT_FAILURE;
     }
-    // did not receive CMD_QUIT, so this is an abnormal state
-    multilog (log, LOG_ERR, "PSRDADA read failed unexpectedly.  Terminating.\n");
-    exit_status = EXIT_FAILURE;
     break;
   }
 
@@ -751,15 +809,38 @@ int main (int argc, char *argv[])
   strncpy (heimdall_file,RFI_MODE?fbfile_kur:fbfile,255);
 
   // check for write to /dev/null and udpate file names if necessary
-  int write_to_null =  0==write_fb;
+  int write_to_null = 0==write_fb;
   if (write_fb == 1) {
     char name[OBSERVATION_NAME_SIZE];
     ascii_header_get (incoming_hdr, "NAME", "%s", name);
     name[OBSERVATION_NAME_SIZE-1] = '\0';
-    if (check_name (name)) {
+    double ra = 0;
+    ascii_header_get (incoming_hdr, "RA", "%lf", &ra);
+    double dec = 0;
+    ascii_header_get (incoming_hdr, "DEC", "%lf", &dec);
+	  char datasetId[EXECUTOR_DATASETID_SIZE];
+    ascii_header_get (incoming_hdr, "DATAID", "%s", &datasetId);
+
+    if (check_coords (ra, dec) )
+    {
+      multilog (log, LOG_INFO,
+          "Source %s matches target coords, recording filterbank data.\n",
+          name);
+      send_email (name, hostname);
+    }
+    else if (check_name (name))
+    {
       multilog (log, LOG_INFO,
           "Source %s matches target list, recording filterbank data.\n",
           name);
+      send_email (name, hostname);
+    }
+    else if (check_id (datasetId))
+    {
+      multilog (log, LOG_INFO,
+          "DATAID %s matches list, recording filterbank data.\n",
+          datasetId);
+      send_email (datasetId, hostname);
     }
     else {
       write_to_null = 1;
@@ -830,41 +911,55 @@ int main (int argc, char *argv[])
   // write out psrdada header; NB this locks the hdu for writing
   if (key_out)
   {
-    if (!buffer_ok[active_buffer])
+    // check status of buffer
+    if (buffer_ok[active_buffer] != 1)
     {
-      // either heimdall crashed, or previous obs. was too short to invoke
-      // heimdall; in either case, reset the psrdada buffer; I think the
-      // easiest way to do this is simply to create a new dada_hdu for
-      // the shared memory
-      fprintf (stderr, "restoring buffer\n");
-      int status = clear_psrdada_buffer (hdu_out[active_buffer]);
-      /*
-      dada_hdu_destroy (hdu_out[active_buffer]);
-      hdu_out[active_buffer] = dada_hdu_create (log);
-      dada_hdu_set_key (hdu_out[active_buffer],key_out+active_buffer*2);
-      if (dada_hdu_connect (hdu_out[active_buffer]) != 0) {
-        multilog (log, LOG_ERR, 
-            "Unable to connect to outgoing PSRDADA buffer #%d!\n",
-              active_buffer+1);
-        exit (EXIT_FAILURE);
-      }
-      */
-      if (status==0)
+      // check to see if we scrubbed the buffer
+      if (scrubber_fp[active_buffer] != NULL)
       {
+        fprintf (stderr, "doing buffer scrub logic\n");
+        fflush (stderr);
+
+        multilog (log, LOG_INFO, "Preparing to pclose scrubber.\n");
+        int scrub_stat = pclose (scrubber_fp[active_buffer]);
+        multilog (log, LOG_INFO, "scrubber pclose status: %d\n", scrub_stat);
+        scrubber_fp[active_buffer] = NULL;
+
+        if (scrub_stat == 0)
+          buffer_ok[active_buffer] = 1;
+      }
+      // otherwise we might have rebuilt it
+      else if (rebuild_fp[active_buffer] != NULL)
+      {
+        multilog (log, LOG_INFO, "Preparing to pclose rebuild.\n");
+        int rebuild_stat = pclose (rebuild_fp[active_buffer]);
+        multilog (log, LOG_INFO, "rebuild pclose status: %d\n", rebuild_stat);
+        rebuild_fp[active_buffer] = NULL;
+
+        // buffer needed to be rebuilt, so we must reconnect
+        dada_hdu_destroy (hdu_out[active_buffer]);
+        hdu_out[active_buffer] = dada_hdu_create (log);
+        dada_hdu_set_key (hdu_out[active_buffer],key_out+active_buffer*2);
+        if (dada_hdu_connect (hdu_out[active_buffer]) != 0) {
+          multilog (log, LOG_ERR, 
+              "Unable to connect to outgoing PSRDADA buffer #%d!\n",
+                active_buffer+1);
+          exit (EXIT_FAILURE);
+        }
         buffer_ok[active_buffer] = 1;
-        fprintf (stderr, "restored buffer\n");
-      }
-      else
-      {
-        fprintf (stderr, "unable to restore buffer\n");
-        buffer_ok[active_buffer] = 0;
       }
     }
+
     if (buffer_ok[active_buffer])
     {
       write_psrdada_header (hdu_out[active_buffer], incoming_hdr, vdhdr,
         npol, heimdall_file);
       fprintf (stderr, "write psrdada header\n");
+    }
+    else
+    {
+      multilog (log, LOG_ERR, "output buffer in bad state, disabling output.\n");
+      // TODO: signal this or exit process?
     }
   }
 
@@ -893,6 +988,7 @@ int main (int argc, char *argv[])
     int sample = getVDIFFrameNumber (vdhdr);
     int second = getVDIFFrameSecond (vdhdr);
 
+    // this segment will continue loop until one full second is read
     if (second==current_sec || major_skip)
     {
 
@@ -930,15 +1026,19 @@ int main (int argc, char *argv[])
         multilog (log, LOG_ERR, "Error on nread=%d.\n",nread);
         exit (EXIT_FAILURE);
       }
+
+      // THIS IS THE PRIMARY SUCCESSFUL EXIT FROM THE PACKET LOOP HERE:
+      // nread==0 --> break
+
       if (nread != VD_FRM) {
         if (nread != 0)
           multilog (log, LOG_INFO,
             "Packet size=%ld, expected %ld.  Aborting this observation.\n",
             nread,VD_FRM);
-        break;
+        break; // potential end of observation, or error
       }
 
-      continue;
+      continue; // back to top of loop over packets
 
     }
 
@@ -954,13 +1054,15 @@ int main (int argc, char *argv[])
          break;
     }
 
-    // every 1s, check for a QUIT command
+    // check for a QUIT command on the multicast control socket
+    // NB this could probably be changed to recvfrom!  in fact, once set
+    // to nonblocking, can use the MultiCastReceive function
     ssize_t npoll_bytes = 0;
-    if (port) npoll_bytes = read (conn.rqst, cmd_buff, 32);
+    npoll_bytes = read (mc_control_sock, mc_control_buff, 32);
     if (npoll_bytes >  0) {
       for (int ib = 0; ib < npoll_bytes; ib++) {
-        printf("Read command character %c.\n",cmd_buff[ib]);
-        if (cmd_buff[ib] == CMD_QUIT) {
+        printf("Read command character %c.\n",mc_control_buff[ib]);
+        if (mc_control_buff[ib] == CMD_QUIT) {
           quit = 1;
           break;
         }
@@ -975,6 +1077,12 @@ int main (int argc, char *argv[])
 
     // keep log on disk up to date
     fflush (logfile_fp);
+
+    // check for FRB injection conditions
+    inject_frb_now = do_inject_frb && (current_sec%60==0);
+    if (inject_frb_now)
+      multilog (log, LOG_INFO,
+        "Injecting an FRB with integrated = %.2f!!!.\n", integrated);
 
     // if we have accumulated at least 10s of data, then launch heimdall
     // (heimdall will hang on very short runs, not sure why, so make sure
@@ -1002,7 +1110,7 @@ int main (int argc, char *argv[])
           // or set active buffer to need reset
         }
         heimdall_fp[active_buffer] = NULL;
-        multilog (log, LOG_INFO, "Successful pclose.\n");
+        multilog (log, LOG_INFO, "Successful heimdall pclose.\n");
         #if PROFILE
         CUDA_PROFILE_STOP(start,stop,&elapsed)
         heimdall_time += elapsed;
@@ -1011,8 +1119,9 @@ int main (int argc, char *argv[])
       char heimdall_cmd[256];
       // NB need to redirect stderr or else we can't catch it
       // TODO -- consider adding zap chans to bottom of band?
-      snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 45000 -gpu_id %d -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -zap_chans 3900 4096 -beam %d -k %x -coincidencer vlite-nrl:27555", gpu_id, station_id, key_out + active_buffer*2); 
-      //snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 45000 -gpu_id 0 -dm 2 1000 -boxcar_max 64 -group_output -zap_chans 0 190 -beam %d -k %x", station_id, key_out + active_buffer*2); 
+      // NB -- do NOT use yield_cpu, it halves performance
+      snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 30720 -gpu_id %d -dm 2 1000 -boxcar_max 64 -output_dir %s -group_output -zap_chans 0 190 -zap_chans 3900 4096 -beam %d -k %x -coincidencer vlite-nrl:27555 -V &> /mnt/ssd/cands/heimdall_log.asc", gpu_id, CANDDIR, station_id, key_out + active_buffer*2); 
+      //snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 30720 -gpu_id %d -dm 2 1000 -boxcar_max 64 -output_dir %s -group_output -zap_chans 0 190 -zap_chans 3900 4096 -beam %d -k %x", gpu_id, CANDDIR, station_id, key_out + active_buffer*2); 
       multilog (log, LOG_INFO, "%s\n", heimdall_cmd);
       heimdall_fp[active_buffer] = popen (heimdall_cmd, "r");
       heimdall_launched = true;
@@ -1041,7 +1150,8 @@ int main (int argc, char *argv[])
       last_sample[i] = -1;
     }
 
-    // do dispatch -- break into chunks to fit in GPU memory
+    // do dispatch -- break into chunks to fit in GPU memory; this is
+    // currently 100 milliseconds
     for (int iseg = 0; iseg < SEG_PER_SEC; iseg++)
     {
 
@@ -1120,9 +1230,19 @@ int main (int argc, char *argv[])
         // (1) NB that fft_in_kur==fft_in if not writing both streams
         // (2) original implementation had a block for each pol; keeping
         //     that, but two blocks now access the same Dagostino entry
-        apply_kurtosis <<<nkurto_per_chunk, 256>>> (
-            fft_in,fft_in_kur,dag_dev,dag_fb_dev,kur_weights_dev);
-        cudacheck (cudaGetLastError () );
+        //if (integrated >= 0.1)
+        if (1)
+        {
+          apply_kurtosis <<<nkurto_per_chunk, 256>>> (
+              fft_in,fft_in_kur,dag_dev,dag_fb_dev,kur_weights_dev);
+          cudacheck (cudaGetLastError () );
+        }
+        else
+        {
+          apply_kurtosis_fake <<<nkurto_per_chunk, 256>>> (
+              fft_in,fft_in_kur,dag_dev,dag_fb_dev,kur_weights_dev);
+          cudacheck (cudaGetLastError () );
+        }
 
         #if WRITE_KURTO
         cudacheck (cudaMemcpy (
@@ -1148,6 +1268,29 @@ int main (int argc, char *argv[])
       fft_time += elapsed;
       #endif
 
+      ////// INJECT FRB AS REQUESTED //////
+      if (inject_frb_now > 0)
+      {
+        // NB that inject_frb_now is only reset every 1s, so we also use
+        // it to keep track of how many segments have elapsed since the
+        // FRB time, since this loop is over 100ms chunks which will be
+        // < dispersed FRB width, typically
+
+        float frb_width = 2e-3*SEG_PER_SEC*FFTS_PER_SEG; //2ms 
+        float frb_amp = 1.05; // gives a single-antenna S/N of about 25-30 for 2ms
+        int nfft_since_frb = (inject_frb_now-1)*FFTS_PER_SEG;
+        inject_frb <<< NCHAN/NTHREAD+1,NTHREAD >>> (fft_out, 
+            frb_delays_dev, nfft_since_frb, frb_width, frb_amp);
+        cudacheck ( cudaGetLastError () );
+        if (RFI_MODE > 1)
+        {
+          inject_frb <<< NCHAN/NTHREAD+1,NTHREAD >>> (fft_out_kur, 
+              frb_delays_dev, nfft_since_frb, frb_width, frb_amp);
+          cudacheck ( cudaGetLastError () );
+        }
+        inject_frb_now += 1;
+      }
+
       ////// NORMALIZE BANDPASS //////
       #if PROFILE
       cudaEventRecord(start,0);
@@ -1155,14 +1298,13 @@ int main (int argc, char *argv[])
       if (RFI_MODE == 0 || RFI_MODE == 2)
       {
         detect_and_normalize2 <<<(NCHAN*2)/NTHREAD+1,NTHREAD>>> (
-            fft_out,bp_dev,bp_scale,fft_per_chunk/2);
+            fft_out,bp_dev,bp_scale);
         cudacheck ( cudaGetLastError () );
       }
       if (RFI_MODE == 1 || RFI_MODE == 2)
       {
         detect_and_normalize3 <<<(NCHAN*2)/NTHREAD+1,NTHREAD>>> (
-            fft_out_kur,kur_weights_dev,bp_kur_dev,bp_scale,
-            fft_per_chunk/2);
+            fft_out_kur,kur_weights_dev,bp_kur_dev,bp_scale);
         cudacheck ( cudaGetLastError () );
       }
       #if PROFILE
@@ -1361,25 +1503,47 @@ int main (int argc, char *argv[])
 
       integrated += 1./double(SEG_PER_SEC);
 
-    }
+    } // end loop over data segments
 
   } // end loop over packets
 
   if (key_out)
   {
-    // if buffer is in good condition
     if (buffer_ok[active_buffer])
     {
+
+      // special case: sometimes observation is too short to result in *any*
+      // written bytes (e.g. VLASS srcSlew) and this will cause 
+      // dada_dbscrubber to hang.  Check for it before we unlock the buffer,
+      // and if the condition pertains, just write a word or two.
+      if ((!heimdall_launched) && (fb_bytes_written == 0))
+          ipcio_write (hdu_out[active_buffer]->data_block,(char*)fft_trim_u_hst,32);
+
+      fprintf (stderr, "process_baseband: before dada_hdu_unlock_write\n");
       dadacheck (dada_hdu_unlock_write (hdu_out[active_buffer]));
-      // if we did not launch heimdall, flag the buffer as bad so it will
-      // be cleared before re-used
+      fprintf (stderr, "process_baseband: after dada_hdu_unlock_write\n");
+      fflush (stderr);
       if (!heimdall_launched)
+      {
+        // need to scrub the buffer
         buffer_ok[active_buffer] = 0;
-      // otherwise, switch to the next buffer and allow heimdall to
-      // continue to process this one
-      if (NOUTBUFF == ++active_buffer)
-        active_buffer = 0;
+        char scrubber_cmd[128];
+        snprintf (scrubber_cmd, 127, "/home/vlite-master/mtk/bin/dada_dbscrubber -k %x -v -v", key_out + active_buffer*2); 
+        scrubber_fp[active_buffer] = popen (scrubber_cmd, "r");
+      }
     }
+    else
+    {
+      // need to rebuild buffer
+      char rebuild_cmd[128];
+      snprintf (rebuild_cmd, 127, "/home/vlite-master/mtk/vlite-fast/scripts/rebuild_dada %x", key_out + active_buffer*2); 
+      rebuild_fp[active_buffer] = popen (rebuild_cmd, "r");
+      buffer_ok[active_buffer] = 0;
+    }
+
+    // increment active buffer
+    if (NOUTBUFF == ++active_buffer)
+      active_buffer = 0;
   }
 
   // before disconnecting from input buffer, make sure we haven't aborted
@@ -1472,13 +1636,15 @@ int main (int argc, char *argv[])
 
   #endif
 
-  if (single_pass)
+  if (profile_pass || single_pass)
     break;
 
   } // end loop over observations
 
-  // close sockets and files
-  shutdown (conn.rqst, 2);
+  // close multicast sockets
+  if (mc_control_sock > 0)
+    shutdown (mc_control_sock, 2);
+
 
   // clean up psrdada data structures
   dada_hdu_disconnect (hdu_in);
@@ -1491,7 +1657,7 @@ int main (int argc, char *argv[])
     }
   }
 
-  //free memory
+  // free memory
   cudaFreeHost (udat);
   cudaFree (udat_dev);
   cudaFree (fft_in);
@@ -1798,7 +1964,8 @@ __global__ void apply_kurtosis (
   // over the two polarizations, but is duplicated, so just use the
   // entry in the second polarization; will also make it easier if
   // we revert to independent polarizations
-  bool bad =  (dag[blockIdx.x] > DAG_THRESH) || (dag_fb[blockIdx.x/(NFFT/NKURTO)] > DAG_FB_THRESH);
+  //bool bad =  (dag[blockIdx.x] > DAG_THRESH) || (dag_fb[blockIdx.x/(NFFT/NKURTO)] > DAG_FB_THRESH);
+  bool bad =  (dag[blockIdx.x] > DAG_THRESH);
 
   #ifdef DEBUG_WEIGHTS
   // if debugging, set the weights to 0 for the second half of all samples in
@@ -1839,6 +2006,29 @@ __global__ void apply_kurtosis (
   }
 }
 
+__global__ void apply_kurtosis_fake (
+    cufftReal *in, cufftReal *out, 
+    cufftReal *dag, cufftReal *dag_fb,
+    cufftReal* norms)
+{
+
+  unsigned int tid = threadIdx.x;
+
+  if (in != out && tid < 250)
+  {
+    size_t offset = blockIdx.x*NKURTO;
+    out[offset + tid] = in[offset + tid];
+    if (NKURTO==500)
+      out[offset + tid + 250] = in[offset + tid + 250];
+  }
+
+  // add one to the filterbank block samples for weights
+  if (tid==0)
+  {
+    atomicAdd (norms + (blockIdx.x*NKURTO)/NFFT, float(NKURTO)/NFFT);
+  }
+}
+
 
 __global__ void histogram ( unsigned char *utime, unsigned int* histo, size_t n)
 {
@@ -1857,14 +2047,69 @@ __global__ void histogram ( unsigned char *utime, unsigned int* histo, size_t n)
   atomicAdd ( histo+threadIdx.x, lhisto[threadIdx.x]);
 }
 
+__global__ void set_frb_delays (float* frb_delays, float dm)
+{
+  int i = threadIdx.x + blockIdx.x*blockDim.x; 
+  if (i >= NCHAN) return;
+  double freq = 0.384 - (i*0.064)/NCHAN;
+  // delays are scaled by FFT timestep
+  double scale = 4.15e-3*dm*SEG_PER_SEC*FFTS_PER_SEG;
+  frb_delays[i] = float(scale/(freq*freq)-scale/(0.384*0.384));
+}
+
+__global__ void inject_frb ( cufftComplex *fft_out, float* frb_delays,
+     int nfft_since_frb, float frb_width, float frb_amp)
+{
+  // NB frb_width must be in FFT time steps!
+
+  // this is the channel; each thread does one channel for all time steps
+  // and both polarizations
+  int i = threadIdx.x + blockIdx.x*blockDim.x; 
+  if (i >= NCHAN) return;
+  
+  // for now, don't try to do any interpolation, just round to the nearest
+  // time index that the FRB encounters this channel
+
+  int time_idx_lo = int(frb_delays[i]+0.5)-nfft_since_frb;
+  int time_idx_hi = int(frb_delays[i]+frb_width+0.5)-nfft_since_frb;
+
+  // if the earliest is after this chunk, return
+  if (time_idx_lo >= FFTS_PER_SEG) return;
+
+  // if the latest time precedes this chunk, return
+  if (time_idx_hi < 0) return;
+
+  // ensure indices are within data bounds
+  if (time_idx_lo < 0) time_idx_lo = 0;
+  if (time_idx_hi >= FFTS_PER_SEG) time_idx_hi = FFTS_PER_SEG-1;
+
+  // otherwise, there is a portion of the FRB in this chunk, so loop over
+  // the time steps that it passes through channel i
+  for (int time_idx=time_idx_lo; time_idx<= time_idx_hi; time_idx++)
+  {
+    fft_out[time_idx*NCHAN+i].x *= frb_amp;
+    fft_out[time_idx*NCHAN+i].y *= frb_amp;
+  }
+
+  // do the next polarization
+  fft_out += FFTS_PER_SEG*NCHAN;
+
+  for (int time_idx=time_idx_lo; time_idx<= time_idx_hi; time_idx++)
+  {
+    fft_out[time_idx*NCHAN+i].x *= frb_amp;
+    fft_out[time_idx*NCHAN+i].y *= frb_amp;
+  }
+
+}
+
 __global__ void detect_and_normalize2 (cufftComplex *fft_out, cufftReal* bp, 
-        float scale, size_t ntime)
+        float scale)
 {
   int i = threadIdx.x + blockIdx.x*blockDim.x; 
   if (i >= NCHAN*2) return;
   if (i >= NCHAN) // advance pointer to next polarization
   {
-    fft_out += ntime*NCHAN;
+    fft_out += FFTS_PER_SEG*NCHAN;
     bp += NCHAN;
     i -= NCHAN;
   }
@@ -1872,12 +2117,12 @@ __global__ void detect_and_normalize2 (cufftComplex *fft_out, cufftReal* bp,
   // initialize bandpass to mean of first block
   float bp_l = bp[i];
   if (0. == bp_l) {
-    for (int j = i; j < ntime*NCHAN; j+= NCHAN)
+    for (int j = i; j < FFTS_PER_SEG*NCHAN; j+= NCHAN)
       bp_l += fft_out[j].x*fft_out[j].x + fft_out[j].y*fft_out[j].y;
-    bp_l /= ntime;
+    bp_l /= FFTS_PER_SEG;
   }
 
-  for (int j = i; j < ntime*NCHAN; j+= NCHAN)
+  for (int j = i; j < FFTS_PER_SEG*NCHAN; j+= NCHAN)
   {
     // detect
     float pow = fft_out[j].x*fft_out[j].x + fft_out[j].y*fft_out[j].y;
@@ -1895,14 +2140,14 @@ __global__ void detect_and_normalize2 (cufftComplex *fft_out, cufftReal* bp,
   bp[i] = bp_l;
 }
 
-__global__ void detect_and_normalize3 (cufftComplex *fft_out, cufftReal* kur_weights_dev, cufftReal* bp, float scale, size_t ntime)
+__global__ void detect_and_normalize3 (cufftComplex *fft_out, cufftReal* kur_weights_dev, cufftReal* bp, float scale)
 {
   int i = threadIdx.x + blockIdx.x*blockDim.x; 
   if (i >= NCHAN*2) return;
   if (i >= NCHAN) // advance pointer to next polarization
   {
-    fft_out += ntime*NCHAN;
-    kur_weights_dev += ntime;
+    fft_out += FFTS_PER_SEG*NCHAN;
+    kur_weights_dev += FFTS_PER_SEG;
     bp += NCHAN;
     i -= NCHAN;
   }
@@ -1911,7 +2156,7 @@ __global__ void detect_and_normalize3 (cufftComplex *fft_out, cufftReal* kur_wei
   float bp_l = bp[i];
   if (0. == bp_l) {
     int good_samples = 0;
-    for (int j = i, time_idx=0; j < ntime*NCHAN; j+= NCHAN,time_idx++) {
+    for (int j = i, time_idx=0; j < FFTS_PER_SEG*NCHAN; j+= NCHAN,time_idx++) {
       float w = kur_weights_dev[time_idx];
       if (0.==w)
         continue;
@@ -1927,7 +2172,7 @@ __global__ void detect_and_normalize3 (cufftComplex *fft_out, cufftReal* kur_wei
       bp_l /= good_samples;
   }
 
-  for (int j = i, time_idx=0; j < ntime*NCHAN; j+= NCHAN,time_idx++)
+  for (int j = i, time_idx=0; j < FFTS_PER_SEG*NCHAN; j+= NCHAN,time_idx++)
   {
     // detect
     //float w = kur_weights_dev[time_idx]*kur_weights_dev[time_idx];
