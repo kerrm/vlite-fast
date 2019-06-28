@@ -1,0 +1,31 @@
+# hostname iface gpu reader_port writer_port info_port baseband_dada_key fb_dada_key coadd_dada_key write_fb nbit
+####
+vlite-difx1.evla.nrao.edu eth0 0 30001 30101 30201 40 42 46 1 2
+####
+vlite-difx2.evla.nrao.edu eth0 0 30001 30101 30201 40 42 46 1 2
+####
+#vlite-difx3.evla.nrao.edu eth0 0 30001 30101 30201 40 42 46 1 2
+####
+vlite-difx4.evla.nrao.edu eth0 0 30001 30101 30201 40 42 46 1 2
+####
+vlite-difx5.evla.nrao.edu eth0 0 30001 30101 30201 40 42 46 1 2
+####
+vlite-difx6.evla.nrao.edu eth0 0 30001 30101 30201 40 42 46 1 2
+####
+vlite-difx7.evla.nrao.edu p1p1 0 30001 30101 30201 40 42 46 1 2
+vlite-difx7.evla.nrao.edu p1p2 1 30002 30102 30202 50 52 56 1 2
+####
+vlite-difx8.evla.nrao.edu p1p1 0 30001 30101 30201 40 42 46 1 2
+vlite-difx8.evla.nrao.edu p1p2 1 30002 30102 30202 50 52 56 1 2
+####
+vlite-difx9.evla.nrao.edu p1p1 0 30001 30101 30201 40 42 46 1 2
+vlite-difx9.evla.nrao.edu p1p2 1 30002 30102 30202 50 52 56 1 2
+####
+vlite-difx10.evla.nrao.edu p1p1 0 30001 30101 30201 40 42 46 1 2
+vlite-difx10.evla.nrao.edu p1p2 1 30002 30102 30202 50 52 56 1 2
+####
+vlite-difx11.evla.nrao.edu p1p1 0 30001 30101 30201 40 42 46 1 2
+vlite-difx11.evla.nrao.edu p1p2 1 30002 30102 30202 50 52 56 1 2
+####
+#vlite-difx12.evla.nrao.edu p1p1 0 30001 30101 30201 40 42 46 1 2
+#vlite-difx12.evla.nrao.edu p1p2 1 30002 30102 30202 50 52 56 1 2

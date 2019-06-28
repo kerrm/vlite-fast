@@ -1,0 +1,22 @@
+#!/bin/bash
+set -x
+# arguments should be
+# $1 = coadded dada key
+# $2 = buffersize 
+# $3 = write_fb
+# $4 = nbit
+PACKAGE_DIR=/home/vlite-master/surya
+HOSTCONFIG=${PACKAGE_DIR}/vlite-fast/config/debugarray
+ROOT=vd5
+# Create buffer at root
+ssh ${ROOT} "/mnt/ssd/bin/dada_db -k ${1} -b ${2} -n 8 -l"
+
+# MPICALL
+# Full array
+#mpirun --hostfile ${HOSTCONFIG} ${PACKAGE_DIR}/bin/agdadacoadd -K ${1} -w ${3} -b ${4} -s ${2} -k 46 -k 46 -k 46 -k 46 -k 46 -k 46 -k 46 -k 56 -k 46 -k 56 -k 46 -k 56 -k 46 -k 56 -k 46 -k 56 -k 46 -k 56
+# Single array
+#mpirun --hostfile ${HOSTCONFIG} ${PACKAGE_DIR}/bin/agdadacoadd -K ${1} -w ${3} -b ${4} -s ${2} -k 46 -k 46 -k 46 -k 46 -k 46 -k 46 -k 46 -k 56 -k 46 -k 56 -k 46 -k 56 -k 46 -k 56 -k 46 -k 56 -k 46 -k 56
+# DEBUG
+mpirun --hostfile ${HOSTCONFIG} ${PACKAGE_DIR}/bin/agdadacoadd -K ${1} -w ${3} -b ${4} -s ${2} -k 46 -k 46 -k 46 -k 46 -k 46 -k 46 
+# Destroy buffer after use
+ssh ${ROOT} "/mnt/ssd/bin/dada_db -k ${1} -d"

@@ -8,10 +8,11 @@
 # $6 = info port
 # $7 = baseband dada key 
 # $8 = filterbank dada key 
-# $9 = write_fb
-# $10 = nbit
+# $9 = coadder dada key
+# $10 = write_fb
+# $11 = nbit
 #set -x
-PACKAGE_DIR=/home/vlite-master/mtk
+PACKAGE_DIR=/home/vlite-master/surya
 CUDA_DIR=/usr/cuda-9.2.88
 export LD_LIBRARY_PATH=${PACKAGE_DIR}/lib:${CUDA_DIR}/lib64:${LD_LIBRARY_PATH}
 #sleep 0.5
@@ -30,7 +31,9 @@ sleep 0.5
 # $1 = reader port
 # $2 = baseband dada key 
 # $3 = filterbank dada key 
-# $4 = write_fb
-# $5 = nbit
+# $4 = coadder dada key
+# $5 = write_fb
+# $6 = nbit
+# $7 = gpu_id
 #sudo LD_LIBRARY_PATH=${LD_LIBRARY_PATH} -b /home/vlite-master/mtk/scripts/start_process ${4} ${7} ${8} ${9} ${10}
-${PACKAGE_DIR}/vlite-fast/scripts/start_process ${4} ${7} ${8} ${9} ${10} ${3} &
+${PACKAGE_DIR}/vlite-fast/scripts/start_process ${4} ${7} ${8} ${9} ${10} ${11} ${3}&

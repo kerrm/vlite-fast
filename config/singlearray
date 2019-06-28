@@ -1,0 +1,14 @@
+# hostfile for single array coaddition
+
+vd1 slots=1 max-slots=1
+vd2 slots=1 max-slots=1
+vd4 slots=1 max-slots=1
+vd5 slots=1 max-slots=1
+vd6 slots=1 max-slots=1
+
+vd7 slots=1 max-slots=1
+vd8 slots=1 max-slots=1
+vd9 slots=1 max-slots=1
+vd10 slots=1 max-slots=1
+vd11 slots=1 max-slots=1
+vd12 slots=1 max-slots=1
