@@ -1,0 +1,11 @@
+#!/bin/bash
+hosts=( vd2 vd3 vd4 vd5 vd6 vd7 vd8 vd9 vd10 vd11 vd12 )
+PACKAGE_DIR=/home/vlite-master/mtk
+for host in "${hosts[@]}"
+do
+  echo "Installing binaries on ${host}."
+  rsync -avz ${PACKAGE_DIR}/vlite-fast/src/writer ${PACKAGE_DIR}/bin/dada_db ${host}:/mnt/ssd/bin &> /dev/null
+  #rsync -avz ${PACKAGE_DIR}/vlite-fast/src/writer ${PACKAGE_DIR}/bin/dada_db ${host}:/mnt/ssd/bin
+  ssh ${host}ops "sudo setcap cap_net_admin,cap_net_raw=eip /mnt/ssd/bin/writer && sudo setcap cap_ipc_lock=eip /mnt/ssd/bin/dada_db" &> /dev/null
+  #ssh ${host}ops "sudo setcap cap_net_admin,cap_net_raw=eip /mnt/ssd/bin/writer && sudo setcap cap_ipc_lock=eip /mnt/ssd/bin/dada_db"
+done

@@ -106,7 +106,7 @@ if __name__ == '__main__':
         #    print Candidate(None,line)
 
         # do I want empty entries?
-        if len(lines) == 1:
+        if len(lines) == 2:
             continue
 
         # this is file start
@@ -123,7 +123,7 @@ if __name__ == '__main__':
 
 
         # add in Candidate objects to the appropriate beam
-        cgroups[beam].extend((Candidate(None,l) for l in lines[1:]))
+        cgroups[beam].extend((Candidate(None,l) for l in lines[2:]))
         if len(cgroups.keys()) < 2:
             #print 'Only one beam, skipping coincidence/triggering.'
             #continue
@@ -133,6 +133,8 @@ if __name__ == '__main__':
 
         # coincidence them
         all_cands = coincidence(cgroups.values())
+        if all_cands is None:
+            continue
 
         # get triggers
         sent_triggers = utc_sent_triggers[utc]

@@ -490,7 +490,7 @@ int main(int argc, char** argv)
         trigger_t* trig = (trigger_t*) (mc_trigger_buf) + i;
         trigger_queue[i] = trig;
         multilog (log, LOG_INFO,
-            "(writer) received a trigger with t0=%.3f and t1=%3.f and meta %s.\n",
+            "(writer) received a trigger with t0=%.3f and t1=%.3f and meta %s.\n",
             trig->t0,trig->t1,trig->meta);
       }
     }
