@@ -28,6 +28,8 @@ extern "C" {
 #include "multicast.h"
 }
 
+#define COADDANT 99
+
 static volatile int NBIT = 2;
 static FILE* logfile_fp = NULL;
 
@@ -86,12 +88,13 @@ void change_extension (const char* in, char* out, const char* oldext, const char
  */
 
 // TODO -- check that this is consistent with sigproc
-int write_psrdada_header (dada_hdu_t* hdu, char* inchdr, vdif_header* vdhdr, int npol, char* fb_file)
+int write_psrdada_header (dada_hdu_t* hdu, char* inchdr, vdif_header* vdhdr, int npol, char* fb_file, int sid)
 {
 
  // handle values from incoming header; set defaults if not available
  int station_id = 0;
  ascii_header_get (inchdr, "STATIONID", "%d", &station_id);
+ station_id = sid ? station_id : COADDANT;
  double ra = 0;
  ascii_header_get (inchdr, "RA", "%lf", &ra);
  double dec = 0;
@@ -225,6 +228,22 @@ void get_fbfile (char* fbfile, ssize_t fbfile_len, char* inchdr, vdif_header* vd
  // Open up filterbank file using timestamp and antenna
  int station_id = 0;
  ascii_header_get (inchdr, "STATIONID", "%d", &station_id);
+ char currt_string[128];
+ time_t epoch_seconds = vdif_to_unixepoch(vdhdr);
+ struct tm utc_time;
+ gmtime_r (&epoch_seconds, &utc_time);
+ strftime (currt_string,sizeof(currt_string), "%Y%m%d_%H%M%S", &utc_time);
+ *(currt_string+15) = 0;
+ if (CHANMIN < 2411)
+	snprintf (fbfile,fbfile_len,"%s/%s_muos_ea%02d.fil",DATADIR,currt_string,station_id);
+ else
+	snprintf (fbfile,fbfile_len,"%s/%s_ea%02d.fil",DATADIR,currt_string,station_id);
+}
+
+void get_fbfile_co (char* fbfile, ssize_t fbfile_len, char* inchdr, vdif_header* vdhdr)
+{
+ // Open up filterbank file using timestamp and antenna
+ int station_id = COADDANT;
  char currt_string[128];
  time_t epoch_seconds = vdif_to_unixepoch(vdhdr);
  struct tm utc_time;
@@ -813,6 +832,8 @@ int main (int argc, char *argv[])
 	get_fbfile (fbfile, 256, incoming_hdr, vdhdr);
 	char fbfile_kur[256];
 	change_extension (fbfile, fbfile_kur, ".fil", "_kur.fil");
+	char fbfile_co[256];
+	get_fbfile_co(fbfile_co, 256, incoming_hdr, vdhdr);
 
 	// use same scheme for ancillary data files
 #if DOHISTO
@@ -977,7 +998,7 @@ int main (int argc, char *argv[])
 	 if (buffer_ok[active_buffer])
 	 {
 		write_psrdada_header (hdu_out[active_buffer], incoming_hdr, vdhdr,
-			npol, heimdall_file);
+			npol, heimdall_file, 1);
 		fprintf (stderr, "write psrdada header\n");
 	 }
 	 else
@@ -987,7 +1008,7 @@ int main (int argc, char *argv[])
 	 }
 	}
 	if(key_co && cobuffer_ok) {
-	 write_psrdada_header(hdu_co, incoming_hdr, vdhdr, npol, heimdall_file);	
+	 write_psrdada_header(hdu_co, incoming_hdr, vdhdr, npol, fbfile_co, 0);	
 	 fprintf(stderr, "Write Coadd header\n");
 	}
 
@@ -1148,7 +1169,7 @@ int main (int argc, char *argv[])
 		// NB need to redirect stderr or else we can't catch it
 		// TODO -- consider adding zap chans to bottom of band?
 		// NB -- do NOT use yield_cpu, it halves performance
-		snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 30720 -gpu_id %d -dm 2 1000 -boxcar_max 64 -output_dir %s -group_output -zap_chans 0 190 -zap_chans 3900 4096 -beam %d -k %x -coincidencer vlite-nrl:27555 -G &> /mnt/ssd/cands/heimdall_log.asc", gpu_id, CANDDIR, station_id, key_out + active_buffer*2); 
+		snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 30720 -gpu_id %d -dm 2 1000 -boxcar_max 64 -output_dir %s -group_output -zap_chans 0 190 -zap_chans 3900 4096 -beam %d -k %x -coincidencer vlite-nrl:27555 -v &> /mnt/ssd/cands/heimdall_log_log.asc", gpu_id, CANDDIR, station_id, key_out + active_buffer*2); 
 		//snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 30720 -gpu_id %d -dm 2 1000 -boxcar_max 64 -output_dir %s -group_output -zap_chans 0 190 -zap_chans 3900 4096 -beam %d -k %x", gpu_id, CANDDIR, station_id, key_out + active_buffer*2); 
 		multilog (log, LOG_INFO, "%s\n", heimdall_cmd);
 		heimdall_fp[active_buffer] = popen (heimdall_cmd, "r");
