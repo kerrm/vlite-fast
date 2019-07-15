@@ -55,7 +55,7 @@ then
 # 8Debug array
 mpirun \
  --display-map --output-filename ${PACKAGE_DIR}/logs/debug8 -host vd10,vd7,vd8,vd9,vd11,vd12 --map-by ppr:1:node ${DC} -k 56  :    \
- --output-filename ${PACKAGE_DIR}/logs/debug8 -host vd4,vd5 --map-by ppr:1:node ${DC} -k 46
+ --output-filename ${PACKAGE_DIR}/logs/debug8 -host vd1,vd4,vd5 --map-by ppr:1:node ${DC} -k 46
 #mpirun -v --output-filename ${PACKAGE_DIR}/logs/debug8 -host vd10 -np 1 ${DC} -k 56
 fi
 # Destroy buffer after use
