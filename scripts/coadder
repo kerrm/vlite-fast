@@ -1,0 +1,9 @@
+#!/bin/bash
+set -x
+# arguments should be
+# $1 = coadded dada key
+# $2 = buffersize 
+# $3 = write_fb
+# $4 = nbit
+PACKAGE_DIR=/home/vlite-master/surya
+DC=${PACKAGE_DIR}/bin/agdadacoadd

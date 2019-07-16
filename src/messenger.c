@@ -32,33 +32,33 @@ void usage ()
 }
 
 void sigint_handler (int dummy) {
-  signal_received = dummy;
-  keep_running = 0;
+		signal_received = dummy;
+		keep_running = 0;
 }
 
 void fill_dummy_obs_doc (ObservationDocument* od)
 {
-  snprintf(od->name,OBSERVATION_NAME_SIZE,"ManualTest");
-  od->ra = 1;
-  od->dec = 1;
-  od->startTime = 55555;
-  /*
-  datasetId = X_osro.57889.63195775463
-  configId = X_osro.57889.63195775463.1
-  startTime = 57889.63464120
-  name = 3C84
-  ra = 0.87180360
-  dec = 0.72451575
-  dra = 0.00000000
-  ddec = 0.00000000
-  azoffs = 0.00000000
-  eloffs = 0.00000000
-  startLST = 0.98718036
-  scanNo = 12
-  subscanNo = 1
-  primaryBand = 10GHz
-  usesPband = 0
-  */
+		snprintf(od->name,OBSERVATION_NAME_SIZE,"ManualTest");
+		od->ra = 1;
+		od->dec = 1;
+		od->startTime = 55555;
+		/*
+		   datasetId = X_osro.57889.63195775463
+		   configId = X_osro.57889.63195775463.1
+		   startTime = 57889.63464120
+		   name = 3C84
+		   ra = 0.87180360
+		   dec = 0.72451575
+		   dra = 0.00000000
+		   ddec = 0.00000000
+		   azoffs = 0.00000000
+		   eloffs = 0.00000000
+		   startLST = 0.98718036
+		   scanNo = 12
+		   subscanNo = 1
+		   primaryBand = 10GHz
+		   usesPband = 0
+		   */
 }
 
 // just a version with built in error logging
@@ -155,7 +155,7 @@ int main(int argc, char** argv)
   //int ant_on_src = 0;
   int recording = 0;
 
-  ScanInfoDocument D; //multicast message struct
+		  ScanInfoDocument D; //multicast message struct
   const ObservationDocument *od;
   AlertDocument A; 
   AntPropDocument last_antprop; // keep a copy of antenna properties

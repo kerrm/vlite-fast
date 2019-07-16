@@ -1,0 +1,62 @@
+#!/bin/bash
+set -x
+# arguments should be
+# $1 = coadded dada key
+# $2 = buffersize 
+# $3 = write_fb
+# $4 = nbit
+PACKAGE_DIR=/home/vlite-master/surya
+ROOT=vd10
+# Create buffer at root
+ssh ${ROOT} "/mnt/ssd/bin/dada_db -k ${1} -b ${2} -n 8 -l"
+# MPICALL
+# MODE = 1 --> Full array
+# MODE = 2 --> Debug array
+MODE=3
+DC="${PACKAGE_DIR}/bin/agdadacoadd -K ${1} -b ${4} -s ${2} -f ${3}"
+if [ ${MODE} -eq 1 ]
+then
+ # Full array
+ mpirun   --output-filename ${PACKAGE_DIR}/logs/full                    \
+ -host vd1 ${DC} -k 46   :    \
+ -host vd2 ${DC} -k 46   :    \
+ -host vd3 ${DC} -k 46   :    \
+ -host vd4 ${DC} -k 46   :    \
+ -host vd5 ${DC} -k 46   :    \
+ -host vd6 ${DC} -k 46   :    \
+ -host vd7 ${DC} -k 46   :    \
+ -host vd7 ${DC} -k 56   :    \
+ -host vd8 ${DC} -k 46   :    \
+ -host vd8 ${DC} -k 56   :    \
+ -host vd9 ${DC} -k 46   :    \
+ -host vd9 ${DC} -k 56   :    \
+ -host vd10 ${DC} -k 46  :    \
+ -host vd10 ${DC} -k 56  :    \
+ -host vd11 ${DC} -k 46  :    \
+ -host vd11 ${DC} -k 56  :    \
+ -host vd12 ${DC} -k 46  :    \
+ -host vd12 ${DC} -k 56   
+elif [ ${MODE} -eq 2 ]
+then
+# Debug array
+ mpirun   --output-filename ${PACKAGE_DIR}/logs/debug                    \
+ -host vd2 ${DC} -k 46   :    \
+ -host vd4 ${DC} -k 46   :    \
+ -host vd6 ${DC} -k 47   :    \
+ -host vd6 ${DC} -k 46   :    \
+ -host vd7 ${DC} -k 56   :    \
+ -host vd8 ${DC} -k 56   :    \
+ -host vd9 ${DC} -k 56   :    \
+ -host vd10 ${DC} -k 56  :    \
+ -host vd11 ${DC} -k 56  :    \
+ -host vd12 ${DC} -k 56   
+elif [ ${MODE} -eq 3 ]
+then
+# 8Debug array
+mpirun \
+ --display-map --output-filename ${PACKAGE_DIR}/logs/debug8 -host vd10,vd7,vd8,vd9,vd11,vd12 --map-by ppr:1:node ${DC} -k 56  :    \
+ --output-filename ${PACKAGE_DIR}/logs/debug8 -host vd1,vd4,vd5 --map-by ppr:1:node ${DC} -k 46
+#mpirun -v --output-filename ${PACKAGE_DIR}/logs/debug8 -host vd10 -np 1 ${DC} -k 56
+fi
+# Destroy buffer after use
+ssh ${ROOT} "/mnt/ssd/bin/dada_db -k ${1} -d"
