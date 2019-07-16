@@ -30,6 +30,7 @@ import calendar
 # combine events overlapping (multiple triggers) provided their total
 # length doesn't exceed MAX_DUMP s
 MAX_DUMP = 20
+DM_DELAY = 4.15e-3*(0.320**-2-0.384**-2)
 
 # set up a listening socket for heimdall server
 
@@ -138,7 +139,7 @@ if __name__ == '__main__':
 
         # get triggers
         sent_triggers = utc_sent_triggers[utc]
-        current_triggers = trigger(all_cands,snthresh=6.0,minbeam=4,wmax=0.15,dmmin=75)
+        current_triggers = trigger(all_cands,snthresh=7.5,minbeam=4,wmax=0.15,dmmin=25)
         new_triggers = set(current_triggers).difference(sent_triggers)
         print 'new_triggers len: ',len(new_triggers) # DEBUG
 
@@ -147,30 +148,24 @@ if __name__ == '__main__':
 
         for trig in new_triggers:
             print 'TRIGGERING ON CANDIDATE:',trig
+            i0,i1 = trig.i0,trig.i1
 
-        # group up triggers within MAX_DUMP seconds
-        # for now, just allow one trigger per processing block (~30s)
-        # could loop over sent triggers if needed
-        i0 = min((t.i0 for t in new_triggers))
-        i1 = -1
-        for trig in new_triggers:
-            if (trig.i1 - i0)*trig.tsamp < MAX_DUMP:
-                sent_triggers.add(trig)
-                i1 = max(i1,trig.i1)
+            # send a trigger based on active_utc, i0, i1        
+            dm_delay = trig.dm*DM_DELAY
+            dump_offs = i0*trig.tsamp
+            dump_len = (i1-i0)*trig.tsamp + dm_delay
 
-        # send a trigger based on active_utc, i0, i1        
-        dump_offs = i1*trig.tsamp
-        dump_len = (i1-i0)*trig.tsamp
-
-        # TODO -- it would be nice to print out the latency between the candidate peak time
-        # and the time the trigger is sent; it is 40-50 s with current gulp settings
-        print 'Sending trigger for UTC %s with offset %d and length %d.'%(utc,dump_offs,dump_len)
-        s = "Trigger at UTC %s + %d"%(utc,dump_offs)
-        t = time.strptime(utc,'%Y-%m-%d-%H:%M:%S')
-        # add in 100ms buffer in case heimdall isn't perfectly accurate!
-        t0 = calendar.timegm(t) + dump_offs - 0.1
-        t1 = t0 + dump_len + 0.2
-        print 't0=',t0,' t1=',t1
-        t = struct.pack('dd128s',t0,t1,s)
-        send_trigger(t)
+            # TODO -- it would be nice to print out the latency between the candidate
+            # peak time and the time the trigger is sent; it is 40-50 s with current 
+            # gulp settings
+            print 'Sending trigger for UTC %s with offset %d and length %.2f.'%(utc,dump_offs,dump_len)
+            s = "Trigger at UTC %s + %d"%(utc,dump_offs)
+            t = time.strptime(utc,'%Y-%m-%d-%H:%M:%S')
+            # add in 100ms buffer in case heimdall isn't perfectly accurate!
+            t0 = calendar.timegm(t) + dump_offs - 0.1
+            t1 = t0 + dump_len + 0.2
+            print 't0=',t0,' t1=',t1
+            t = struct.pack('dd128s',t0,t1,s)
+            send_trigger(t)
+            sent_triggers.add(trig)
 

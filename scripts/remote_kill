@@ -6,13 +6,15 @@
 #  let C=$C+1
 #done
 #ssh vliteops@vlite-difx1 "sudo killall -SIGINT writer; sudo killall -SIGINT process_baseband; killall heimdall; sleep 0.1; sudo /home/vlite-master/mtk/scripts/kill_dada" &> /dev/null
-ssh vliteops@vlite-difx2 "sudo killall -SIGINT writer; sudo killall -SIGINT process_baseband; killall heimdall; sleep 0.1; sudo /home/vlite-master/mtk/scripts/kill_dada" &> /dev/null
-ssh vliteops@vlite-difx3 "sudo killall -SIGINT writer; sudo killall -SIGINT process_baseband; killall heimdall; sleep 0.1; sudo /home/vlite-master/mtk/scripts/kill_dada" &> /dev/null
-ssh vliteops@vlite-difx4 "sudo killall -SIGINT writer; sudo killall -SIGINT process_baseband; killall heimdall; sleep 0.1; sudo /home/vlite-master/mtk/scripts/kill_dada" &> /dev/null
-ssh vliteops@vlite-difx5 "sudo killall -SIGINT writer; sudo killall -SIGINT process_baseband; killall heimdall; sleep 0.1; sudo /home/vlite-master/mtk/scripts/kill_dada" &> /dev/null
-ssh vliteops@vlite-difx6 "sudo killall -SIGINT writer; sudo killall -SIGINT process_baseband; killall heimdall; sleep 0.1; sudo /home/vlite-master/mtk/scripts/kill_dada" &> /dev/null
-ssh vliteops@vlite-difx7 "sudo killall -SIGINT writer; sudo killall -SIGINT process_baseband; killall heimdall; sleep 0.1; sudo /home/vlite-master/mtk/scripts/kill_dada" &> /dev/null
-ssh vliteops@vlite-difx8 "sudo killall -SIGINT writer; sudo killall -SIGINT process_baseband; killall heimdall; sleep 0.1; sudo /home/vlite-master/mtk/scripts/kill_dada" &> /dev/null
-ssh vliteops@vlite-difx9 "sudo killall -SIGINT writer; sudo killall -SIGINT process_baseband; killall heimdall; sleep 0.1; sudo /home/vlite-master/mtk/scripts/kill_dada" &> /dev/null
-ssh vliteops@vlite-difx10 "sudo killall -SIGINT writer; sudo killall -SIGINT process_baseband; killall heimdall; sleep 0.1; sudo /home/vlite-master/mtk/scripts/kill_dada" &> /dev/null
-ssh vliteops@vlite-difx11 "sudo killall -SIGINT writer; sudo killall -SIGINT process_baseband; killall heimdall; sleep 0.1; sudo /home/vlite-master/mtk/scripts/kill_dada" &> /dev/null
+ssh vd1 "killall -SIGINT writer; killall -SIGINT process_baseband; killall heimdall" &> /dev/null
+ssh vd2 "killall -SIGINT writer; killall -SIGINT process_baseband; killall heimdall" &> /dev/null
+ssh vd3 "killall -SIGINT writer; killall -SIGINT process_baseband; killall heimdall" &> /dev/null
+ssh vd4 "killall -SIGINT writer; killall -SIGINT process_baseband; killall heimdall" &> /dev/null
+ssh vd5 "killall -SIGINT writer; killall -SIGINT process_baseband; killall heimdall" &> /dev/null
+ssh vd6 "killall -SIGINT writer; killall -SIGINT process_baseband; killall heimdall" &> /dev/null
+ssh vd7 "killall -SIGINT writer; killall -SIGINT process_baseband; killall heimdall" &> /dev/null
+ssh vd8 "killall -SIGINT writer; killall -SIGINT process_baseband; killall heimdall" &> /dev/null
+ssh vd9 "killall -SIGINT writer; killall -SIGINT process_baseband; killall heimdall" &> /dev/null
+ssh vd10 "killall -SIGINT writer; killall -SIGINT process_baseband; killall heimdall" &> /dev/null
+ssh vd11 "killall -SIGINT writer; killall -SIGINT process_baseband; killall heimdall" &> /dev/null
+ssh vd12 "killall -SIGINT writer; killall -SIGINT process_baseband; killall heimdall" &> /dev/null

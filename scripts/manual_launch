@@ -1,12 +1,13 @@
 #!/bin/bash
 #set -x
-conf="../config/manual"
-grep -v "^#" < ${conf} | while read LINE
-do
-echo ${LINE}
-toks=( $LINE )
-echo "run this line on the appropriate node:"
-echo "/home/vlite-master/mtk/scripts/start_single ${LINE}"
-done
-read -n 1 -s -p "Press any key to continue once you've done those things.  Then connect with _telnet vlite-nrl 25601."
-/home/vlite-master/mtk/src/messenger -m 25601 ${conf}
+#conf="../config/manual"
+#grep -v "^#" < ${conf} | while read LINE
+#do
+#echo ${LINE}
+#toks=( $LINE )
+#echo "run this line on the appropriate node:"
+#echo "/home/vlite-master/mtk/scripts/start_single ${LINE}"
+#done
+#read -n 1 -s -p "Press any key to continue once you've done those things.  Then connect with _telnet vlite-nrl 25601."
+echo "To control, connect with: telnet vlite-nrl 25601."
+/home/vlite-master/mtk/bin/messenger -m 25601 ${conf}

@@ -40,6 +40,8 @@ fi
 #${PACKAGE_DIR}/bin/process_baseband -k ${2} -K ${3} -w ${4} -b ${5} -g ${6} -o -i 
 # this will only write kurtosis
 #${PACKAGE_DIR}/bin/process_baseband -k ${2} -K ${3} -w ${4} -b ${5} -g ${6} -o -r 1
+# this will only write non-kurtosis
+#${PACKAGE_DIR}/bin/process_baseband -k ${2} -K ${3} -w ${4} -b ${5} -g ${6} -o -r 0
 # this will write both
 #${PACKAGE_DIR}/bin/process_baseband -k ${2} -K ${3} -w ${4} -b ${5} -g ${6} -o 
 # this will write coadd

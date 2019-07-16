@@ -17,14 +17,13 @@ PACKAGE_DIR = /home/vlite-master/surya
 
 all: process_baseband genbase readbase messenger writer
 
-install:
+install: all
 	cp -p process_baseband ${PACKAGE_DIR}/bin
 	cp -p genbase ${PACKAGE_DIR}/bin
 	cp -p readbase ${PACKAGE_DIR}/bin
 	cp -p messenger ${PACKAGE_DIR}/bin
 	cp -p writer ${PACKAGE_DIR}/bin
-	rsync -avz writer ${PACKAGE_DIR}/bin/dada_db vd12:/mnt/ssd/bin &> /dev/null
-	ssh vd12ops "sudo setcap cap_net_admin,cap_net_raw=eip /mnt/ssd/bin/writer && sudo setcap cap_ipc_lock=eip /mnt/ssd/bin/dada_db" &> /dev/null
+	${PACKAGE_DIR}/vlite-fast/scripts/install_binaries
 
 process_baseband: process_baseband.o util.o cuda_util.o utils.o multicast.o
 	$(NVCC) -o $@ $@.o utils.o util.o cuda_util.o multicast.o -lcufft -lcurand -L${MAKE_PACKAGE_DIR}/lib -lvdifio -lpsrdada
