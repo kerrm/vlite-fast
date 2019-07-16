@@ -37,6 +37,7 @@ void usage ()
   fprintf (stdout,"Usage: process [options]\n"
 	  "-k hexadecimal shared memory key for input (default: 40)\n"
 	  "-K hexadecimal shared memory key for output (default: 0=disabled)\n"
+	  "-C hexadecimal shared memory key for coadder (default: 0=disabled)\n"
 //	  "-p listening port number (default: %zu; if 0, disable)\n"
 	  "-o print logging messages to stdout (as well as logfile)\n"
 	  "-w output filterbank data (0=no sources, 1=listed sources, 2=all sources [def])\n"
@@ -245,6 +246,7 @@ int main (int argc, char *argv[])
   int exit_status = EXIT_SUCCESS;
   key_t key_in = 0x40;
   key_t key_out = 0x0;
+  key_t key_co = 0x0;
   //uint64_t port = READER_SERVICE_PORT;
   int stdout_output = 0;
   int write_fb = 2;
@@ -257,7 +259,7 @@ int main (int argc, char *argv[])
   int gpu_id = 0;
 
   int arg = 0;
-  while ((arg = getopt(argc, argv, "hik:K:omw:b:P:r:stg:")) != -1) {
+  while ((arg = getopt(argc, argv, "hik:K:C:omw:b:P:r:stg:")) != -1) {
 
     switch (arg) {
 
@@ -267,6 +269,12 @@ int main (int argc, char *argv[])
       
     case 'k':
       if (sscanf (optarg, "%x", &key_in) != 1) {
+        fprintf (stderr, "writer: could not parse key from %s\n", optarg);
+        return -1;
+      }
+      break;
+    case 'C':
+      if (sscanf (optarg, "%x", &key_co) != 1) {
         fprintf (stderr, "writer: could not parse key from %s\n", optarg);
         return -1;
       }
@@ -439,6 +447,7 @@ int main (int argc, char *argv[])
 
   // connect to output buffer (optional)
   dada_hdu_t* hdu_out[NOUTBUFF] = {NULL};
+  dada_hdu_t * hdu_co = NULL;
   FILE* heimdall_fp[NOUTBUFF] = {NULL};
   FILE* scrubber_fp[NOUTBUFF] = {NULL};
   FILE* rebuild_fp[NOUTBUFF] = {NULL};
@@ -961,6 +970,10 @@ int main (int argc, char *argv[])
       multilog (log, LOG_ERR, "output buffer in bad state, disabling output.\n");
       // TODO: signal this or exit process?
     }
+  }
+  if(key_co) {
+    write_psrdada_header(hdu_co, incoming_hdr, vdhdr, npol, heimdall_file); 
+    fprintf(stderr, "Write Coadd header\n");
   }
 
   // write out a sigproc header
@@ -1541,6 +1554,29 @@ int main (int argc, char *argv[])
       buffer_ok[active_buffer] = 0;
     }
 
+  if(key_co) {
+    char* outbuff = RFI_MODE==2? (char*)fft_trim_u_kur_hst:
+    (char*)fft_trim_u_hst;
+    ipcio_t* ipc = hdu_co->data_block;
+    uint64_t m_nbufs = ipcbuf_get_nbufs ((ipcbuf_t *)ipc);
+    uint64_t m_full_bufs = ipcbuf_get_nfull((ipcbuf_t*) ipc);
+    if (m_full_bufs == (m_nbufs - 1))
+    {
+      dadacheck (dada_hdu_unlock_write (hdu_co));
+      multilog (log, LOG_ERR, "Only one free buffer left!  Aborting output to coadder and clearing buffer.\n");
+    }
+    else
+    {
+      size_t written = ipcio_write (
+        hdu_co->data_block,outbuff,maxn);
+      if (written != maxn)
+      {
+        multilog (log, LOG_ERR, "Tried to write %lu bytes to coadd psrdada buffer but only wrote %lu.", maxn, written);
+        fprintf (stderr, "Tried to write %lu bytes to coadd psrdada buffer but only wrote %lu.", maxn, written);
+        exit (EXIT_FAILURE);
+      }
+    }
+  }
     // increment active buffer
     if (NOUTBUFF == ++active_buffer)
       active_buffer = 0;
