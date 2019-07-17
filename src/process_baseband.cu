@@ -690,6 +690,7 @@ int main (int argc, char *argv[])
 
   // TODO -- probably want to make this have a timeout to avoid pegging the CPU
   // TODO -- make writer issue a START over multicast so we don't need to block
+  //         except, we don't want all writers talking to all PBs!
   get_cmds (cmds, mc_control_sock, mc_control_buff, 32, logfile_fp);
   if (cmds[2]) // CMD_QUIT
     break;

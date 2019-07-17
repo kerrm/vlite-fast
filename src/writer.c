@@ -280,7 +280,7 @@ ObservationDocument* search_od_cache (ObservationDocument* first_od, int od_cach
  * like VLASS.  For speed, we are also ignoring projection effects!
  */
 int check_od_consistency (ObservationDocument* od1, 
-    ObservationDocument* od2, multilog_t* log)
+    ObservationDocument* od2, multilog_t* log, int* obs_length)
 {
 
   // check for edge case of FINISH scan
@@ -288,19 +288,17 @@ int check_od_consistency (ObservationDocument* od1,
     return 0;
 
   double rtol = 0.00873; // 0.5 deg
-  double max_integ = 480; // 8 minutes
+  int max_integ = 480; // 8 minutes
   if ((fabs(od1->ra-od2->ra)< rtol) && fabs(od1->dec-od2->dec) < rtol)
   {
-     double dt_sec = (od2->startTime - od1->startTime)*86400;
-     fprintf (stderr, "dt=%.2f\n",dt_sec);
-     if (dt_sec < max_integ)
+     if (*obs_length < max_integ)
      {
        multilog (log, LOG_INFO,
            "Pointing unchanged, will continue to integrate.\n");
        return 1;
      }
      multilog (log, LOG_INFO,
-         "Integration exceeded %lf s, starting a new one.\n", max_integ);
+         "Integration exceeded %ds, starting a new one.\n", max_integ);
   }
   return 0;
 }
@@ -330,6 +328,7 @@ int main(int argc, char** argv)
   int last_frame[2] = {-2,-2};
   int pause_seconds = 0;
   int last_pause = 0;
+  int obs_length = 0;
   double vdif_dmjd = -1;
   
   int state = STATE_STOPPED;
@@ -443,7 +442,7 @@ int main(int argc, char** argv)
   trigger_t* trigger_queue[MAX_TRIGGERS] = {NULL};
   
   char mc_info_buf[MSGMAXSIZE];
-  int mc_info_sock = open_mc_socket (mc_vlitegrp, MULTI_OBSINFO_PORT,
+  int mc_info_sock = open_mc_socket (mc_obsinfogrp, MULTI_OBSINFO_PORT,
       "Observation Info [Writer]", &maxsock, log);
 
   // Open raw data stream socket
@@ -522,7 +521,8 @@ int main(int argc, char** argv)
     }
     
     //
-    if ((cmd == CMD_FAKE_START) && (state == STATE_STOPPED))
+    //if ((cmd == CMD_FAKE_START) && (state == STATE_STOPPED))
+    if ((cmd == CMD_FAKE_START))
     {
       od_cache_idx += 1;
         if (od_cache_idx == OD_CACHE_SIZE)
@@ -532,8 +532,8 @@ int main(int argc, char** argv)
           "Inserting a fake START observation document.\n");
     }
 
-    if ((cmd == CMD_FAKE_STOP) && (state == STATE_STARTED))
-    //if ((cmd == CMD_FAKE_STOP))
+    //if ((cmd == CMD_FAKE_STOP) && (state == STATE_STARTED))
+    if ((cmd == CMD_FAKE_STOP))
     {
       od_cache_idx += 1;
         if (od_cache_idx == OD_CACHE_SIZE)
@@ -569,6 +569,7 @@ int main(int argc, char** argv)
       parseScanInfoDocument (&D, mc_info_buf);
       if (D.type == SCANINFO_OBSERVATION)
       {
+        multilog (log, LOG_INFO, "Incoming ObservationDocument:\n");
         printScanInfoDocument (&D);
         od_cache_idx += 1;
         if (od_cache_idx == OD_CACHE_SIZE)
@@ -719,6 +720,9 @@ int main(int argc, char** argv)
               continue;
             }
 
+            if (state == STATE_STARTED)
+              obs_length += 1;
+
             // check buffer start/stop times and issue any observation
             // changes as necessary
             ObservationDocument* best_match = search_od_cache (
@@ -726,16 +730,19 @@ int main(int argc, char** argv)
             if (best_match != current_od)
             {
 
-              fprintf (stderr,"Found a newer observation document.\n");
-              fprint_observation_document (stderr,best_match);
+              multilog (log, LOG_INFO, "Found a newer ObservationDocument.\n");
+              //fprint_observation_document (stderr,best_match);
 
               // If already recording, check to see if new scan is consistent
               // with the old one.  If not, stop the observation.
+              int new_obs = 1;
               if (state==STATE_STARTED)
               {
-                if (!check_od_consistency (current_od, best_match, log))
+                // TODO -- as written this won't actually trigger on the max obs
+                // length, we could keep track of that locally.
+                if (!check_od_consistency (current_od, best_match, log, &obs_length))
                 {
-                  fprintf (stderr, "ODs are inconsistent.\n");
+                  // stop current observation if they are inconsistent
                   if (!stop_observation (hdu, log, &packets_written, &state))
                   {
                     exit_status = EXIT_FAILURE;
@@ -743,12 +750,14 @@ int main(int argc, char** argv)
                     break;
                   }
                 }
+                else
+                  new_obs = 0;
               }
 
               current_od = best_match;
 
               // Start new observation (unless FINISH).
-              if (strcasecmp (current_od->name, "FINISH") != 0) 
+              if (new_obs && (strcasecmp (current_od->name, "FINISH") != 0) )
               {
                 multilog (log, LOG_INFO,"[STATE_STOPPED->START]\n");
                 state = STATE_STARTED;
