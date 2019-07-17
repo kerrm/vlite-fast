@@ -134,6 +134,8 @@ int check_for_cmd (int socket, char* buf, int maxlen, FILE* outstream) {
     case CMD_STOP: return CMD_STOP;
     case CMD_QUIT: return CMD_QUIT;
     case CMD_EVENT: return CMD_EVENT;
+    case CMD_FAKE_START: return CMD_FAKE_START;
+    case CMD_FAKE_STOP: return CMD_FAKE_STOP;
     default: {
       fprintf (outstream, 
           "wait_for_cmd: Unrecognized command %c, defaulting to CMD_NONE.\n",buf[0]);
@@ -148,6 +150,8 @@ int check_for_cmd (int socket, char* buf, int maxlen, FILE* outstream) {
       case CMD_START: return CMD_START;
       case CMD_STOP: return CMD_STOP;
       case CMD_QUIT: return CMD_QUIT;
+      case CMD_FAKE_START: return CMD_FAKE_START;
+      case CMD_FAKE_STOP: return CMD_FAKE_STOP;
       case CMD_EVENT: continue;
 	//case '\0': continue;
       default: {
@@ -505,7 +509,7 @@ time_t vdif_to_unixepoch (vdif_header* vdhdr)
   unix_epoch.tm_year = 70;
   unix_epoch.tm_mon = 0;
   unix_epoch.tm_mday = 1;
-  time_t local_offset = mktime(&unix_epoch);
+  time_t local_offset = mktime (&unix_epoch);
   return epoch_seconds-local_offset;
 }
 
@@ -513,7 +517,7 @@ double vdif_to_dunixepoch (vdif_header* vdhdr, time_t* seconds)
 {
   time_t second = vdif_to_unixepoch (vdhdr);
   if (seconds != NULL) *seconds = second;
-  return second + (1./MAXFRAMENUM)*vdhdr->frame;
+  return second + (1./FRAMESPERSEC)*vdhdr->frame;
 }
 
 int dump_check_name (char* src, char* did)

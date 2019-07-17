@@ -253,10 +253,10 @@ int main (int argc, char *argv[])
   int npol = 1;
   int do_inject_frb = 0;
   int RFI_MODE=2;
-  int major_skip = 0;
   int profile_pass = 0;  
   int single_pass = 0;  
   int gpu_id = 0;
+  size_t maxn = 0;
 
   int arg = 0;
   while ((arg = getopt(argc, argv, "hik:K:C:omw:b:P:r:stg:")) != -1) {
@@ -425,7 +425,7 @@ int main (int argc, char *argv[])
     strcat (incoming_hdr, " ");
     strncat (incoming_hdr, argv[i], 4095-strlen(incoming_hdr));
   }
-  multilog (log, LOG_INFO, "invoked with: \n%s\n", incoming_hdr);
+  multilog (log, LOG_INFO, "[PROCESS_BASEBAND] invoked with: \n%s\n", incoming_hdr);
   if (key_out)
     multilog (log, LOG_INFO, "Will write to %d psrdada buffers.\n",
       NOUTBUFF);
@@ -452,6 +452,7 @@ int main (int argc, char *argv[])
   FILE* scrubber_fp[NOUTBUFF] = {NULL};
   FILE* rebuild_fp[NOUTBUFF] = {NULL};
   int buffer_ok[NOUTBUFF] = {0};
+  int cobuffer_ok = 0;
   int active_buffer = 0;
   if (key_out) {
     // connect to the output buffer(s)
@@ -467,6 +468,17 @@ int main (int argc, char *argv[])
       buffer_ok[ibuff] = 1;
     }
   }
+ if (key_co) {
+	// connect to coadd buffer
+	hdu_co = dada_hdu_create(log);
+	dada_hdu_set_key(hdu_co, key_co);
+	if (dada_hdu_connect (hdu_co) != 0) {
+	 multilog (log, LOG_ERR, 
+		 "Unable to connect to Coadding PSRDADA buffer key=%x!\n",key_co);
+	 exit (EXIT_FAILURE);
+	}
+	cobuffer_ok = 1;
+ }
 
   #if PROFILE
   cudaEventRecord(start,0);
@@ -650,15 +662,9 @@ int main (int argc, char *argv[])
   */
 
   // connect to multicast control socket
-  int mc_control_sock = 0;
+  int mc_control_sock = open_mc_socket (mc_vlitegrp, MC_READER_PORT,
+      (char*)"Control Socket [Process Baseband]", NULL, log);
   char mc_control_buff[32];
-  mc_control_sock = openMultiCastSocket ("224.3.29.71", 20000);
-  if (mc_control_sock < 0) {
-    multilog (log, LOG_ERR, "Failed to open Observation multicast; openMultiCastSocket = %d\n",mc_control_sock);
-    exit (EXIT_FAILURE);
-  }
-  else
-    multilog (log, LOG_INFO, "Control socket: %d\n",mc_control_sock);
   fcntl (mc_control_sock, F_SETFL, O_NONBLOCK); // set up for polling
   int cmds[5] = {0,0,0,0,0};
 
@@ -682,20 +688,21 @@ int main (int argc, char *argv[])
   if (quit)
     break;
 
+  // TODO -- probably want to make this have a timeout to avoid pegging the CPU
+  // TODO -- make writer issue a START over multicast so we don't need to block
   get_cmds (cmds, mc_control_sock, mc_control_buff, 32, logfile_fp);
   if (cmds[2]) // CMD_QUIT
     break;
-  if (!cmds[0]) // CMD_START
-    continue;
+  //if (!cmds[0]) // CMD_START
+  //  continue;
 
-  fflush (logfile_fp);
   dadacheck (dada_hdu_lock_read (hdu_in) );
-  multilog (log, LOG_INFO, "Waiting for DADA header.\n");
-  fflush (logfile_fp);
 
   // this will block until a header has been created by writer, 
   // signalling the start of an observation
   // TODO -- this is encapsulated in dada_hdu_open
+  multilog (log, LOG_INFO, "Waiting for DADA header.\n");
+  fflush (logfile_fp);
   uint64_t hdr_size = 0;
   char* ascii_hdr = ipcbuf_get_next_read (hdu_in->header_block,&hdr_size);
   multilog (log, LOG_INFO, "Received header with size %d.\n", hdr_size);
@@ -724,73 +731,23 @@ int main (int argc, char *argv[])
   memcpy (incoming_hdr,ascii_hdr,hdr_size);
   dadacheck (ipcbuf_mark_cleared (hdu_in->header_block));
 
-  int bad_packets = 0;
-  int skip_observation = 1;
-  int frames_in_order[2] = {0,0};
-  int last_sample[2] = {-1,-1};
-
-  // consume from the buffer until we reach 1-s boundary
-
-  // change this to consume until we reach 1-s boundary AND the previous
-  // 1s of data are contiguous; this will hopefully prevent problems with
-  // packet loss; if we haven't achieved a good chunk after 10 "seconds"
-  // worth of packets, abort the observation
-  for (int i=0; i < VLITE_FRAME_RATE*20; ++i)
+  // July 17, 2019.  Changes in writer ensure all arriving data are
+  // contiguous and aligned to 1-s boundaries in the buffer. Read first
+  // frame and verify this, and use for metadata.
+  ssize_t nread = ipcio_read (hdu_in->data_block,frame_buff,VD_FRM);
+  if (nread != VD_FRM)
   {
-    ssize_t nread = ipcio_read (hdu_in->data_block,frame_buff,VD_FRM);
-    if (nread != VD_FRM)
-    {
-      if (0==nread)
-      {
-        multilog (log, LOG_INFO,
-            "Observation ended before reaching 1-s boundary.\n");
-        break;
-      }
-      bad_packets++;
-      continue;
-    }
-    if (nread < 0)
-    {
-      multilog (log, LOG_ERR, "Problem with nread! Skipping observation.\n");
-      skip_observation = 1;
-      break;
-    }
-    if (0==i)
-      multilog (log, LOG_INFO,"Starting trim at frame %d and second %d.\n",
-          getVDIFFrameNumber(vdhdr),getVDIFFrameSecond(vdhdr));
-
-    int thread = getVDIFThreadID (vdhdr) != 0;
-    int sample = getVDIFFrameNumber (vdhdr);
-
-    // at the beginning of a second, check for contiguity
-    if (0==sample)
-    {
-      // we have passed through and have acquired a full second of data
-      if ((VLITE_FRAME_RATE-1)==frames_in_order[0] &&
-          (VLITE_FRAME_RATE-1)==frames_in_order[1])
-      {
-        skip_observation = 0;
-        break;
-      }
-      else
-        frames_in_order[thread] = 0;
-    }
-    else if (sample==last_sample[thread]+1)
-      frames_in_order[thread]++;
-
-    last_sample[thread] = sample;
-
+    multilog (log, LOG_ERR, "Problem reading first bloody frame!  Bailing.");
+    exit_status = EXIT_FAILURE;
+    break; 
   }
-
-  if (bad_packets > 0)
-    multilog (log, LOG_INFO,
-      "Exiting buffer consumption with %d bad packets.\n",bad_packets);
-
-  if (skip_observation)
+  int thread = getVDIFThreadID (vdhdr) != 0;
+  int frame = getVDIFFrameNumber (vdhdr);
+  if ((frame != 0) && (thread != 0))
   {
-    multilog (log, LOG_INFO, "Skipping observation.\n");
-    dadacheck (dada_hdu_unlock_read (hdu_in));
-    continue;
+    multilog (log, LOG_ERR, "Incoming data were not aligned!");
+    exit_status = EXIT_FAILURE;
+    break;
   }
 
   // Open up filterbank file at appropriate time
@@ -819,7 +776,8 @@ int main (int argc, char *argv[])
 
   // check for write to /dev/null and udpate file names if necessary
   int write_to_null = 0==write_fb;
-  if (write_fb == 1) {
+  if (write_fb == 1)
+  {
     char name[OBSERVATION_NAME_SIZE];
     ascii_header_get (incoming_hdr, "NAME", "%s", name);
     name[OBSERVATION_NAME_SIZE-1] = '\0';
@@ -971,7 +929,7 @@ int main (int argc, char *argv[])
       // TODO: signal this or exit process?
     }
   }
-  if(key_co) {
+  if(key_co && cobuffer_ok) {
     write_psrdada_header(hdu_co, incoming_hdr, vdhdr, npol, heimdall_file); 
     fprintf(stderr, "Write Coadd header\n");
   }
@@ -987,11 +945,9 @@ int main (int argc, char *argv[])
 
   // set up sample# trackers and copy first frame into 1s-buffer
   int current_sec = getVDIFFrameSecond(vdhdr);
-  last_sample[0] = last_sample[1] = -1;
   int current_thread = getVDIFThreadID (vdhdr) != 0;
   multilog (log, LOG_INFO, "Starting sec=%d, thread=%d\n",current_sec,current_thread);
 
-  bool skipped_data_announced = false;
   double integrated = 0.0;
   bool heimdall_launched = false;
 
@@ -1002,38 +958,24 @@ int main (int argc, char *argv[])
     int second = getVDIFFrameSecond (vdhdr);
 
     // this segment will continue loop until one full second is read
-    if (second==current_sec || major_skip)
+    if (second==current_sec)
     {
 
       #if PROFILE
       cudaEventRecord (start,0);
       #endif 
 
+      // copy previous frame to contiguous 1-s buffer
       size_t idx = VLITE_RATE*thread + sample*VD_DAT;
       memcpy (udat + idx,dat,VD_DAT);
-
-      // check for skipped data
-      if (sample!=last_sample[thread] + 1)
-      {
-        if (!skipped_data_announced) {
-          multilog (log, LOG_INFO, "Found skipped data in current second!\n");
-          skipped_data_announced = true;
-        }
-        // set the intervening memory to zeros
-        // TODO -- not sure this is correct, and not sure what to set
-        // memory to, if anything; probably should just abort
-        //idx = VLITE_RATE*thread + (last_sample[thread]+1)*VD_DAT;
-        //memset (udat+idx,0,VD_DAT*(sample-last_sample[thread]-1));
-      }
-      last_sample[thread] = sample;
 
       // read the next frame into the buffer
       ssize_t nread = ipcio_read (hdu_in->data_block,frame_buff,VD_FRM);
 
-#if PROFILE
+      #if PROFILE
       CUDA_PROFILE_STOP(start,stop,&elapsed)
       read_time += elapsed;
-#endif
+      #endif
 
       if (nread < 0 ) {
         multilog (log, LOG_ERR, "Error on nread=%d.\n",nread);
@@ -1052,7 +994,6 @@ int main (int argc, char *argv[])
       }
 
       continue; // back to top of loop over packets
-
     }
 
     if (second - current_sec > 1)
@@ -1060,26 +1001,18 @@ int main (int argc, char *argv[])
       // this should only happen when observing over epoch changes,
       // leap seconds, or when there are major data drops.  When that
       // happens, just restart the code.
-      multilog (log, LOG_ERR,
-        "Major data skip!  (%d vs. %d; thread = %d) Aborting this observation.\n",
-         second,current_sec,thread);
-         major_skip = 1;
-         break;
+      multilog (log, LOG_ERR, "Major data skip!  (%d vs. %d; thread = %d) Aborting this observation.\n", second,current_sec,thread);
+      exit_status = EXIT_FAILURE;
+      quit = 1;
+      break;
     }
 
-    // check for a QUIT command on the multicast control socket
-    // NB this could probably be changed to recvfrom!  in fact, once set
-    // to nonblocking, can use the MultiCastReceive function
-    ssize_t npoll_bytes = 0;
-    npoll_bytes = read (mc_control_sock, mc_control_buff, 32);
-    if (npoll_bytes >  0) {
-      for (int ib = 0; ib < npoll_bytes; ib++) {
-        printf("Read command character %c.\n",mc_control_buff[ib]);
-        if (mc_control_buff[ib] == CMD_QUIT) {
-          quit = 1;
-          break;
-        }
-      }
+    // check for a QUIT command once every second
+    if (test_for_cmd (CMD_QUIT, mc_control_sock, mc_control_buff, 32, logfile_fp))
+    {
+      multilog (log, LOG_INFO, "Received CMD_QUIT, indicating data taking is ceasing.  Exiting.\n");
+      quit = 1;
+      break;
     }
     if (quit) {
       multilog (log, LOG_INFO, "Received CMD_QUIT.  Exiting!.\n");
@@ -1141,27 +1074,7 @@ int main (int argc, char *argv[])
     }
 
     // check that both buffers are full
-    skipped_data_announced = false;
     current_sec = second;
-
-    // need to dispatch the current buffer; zero fill any discontinuity
-    // at the end; TODO is this redundant?  Already checking for skipped
-    // data; I guess at this point we might have more of an idea about the
-    // magnitude of a skip
-    for (int i = 0; i < 2; ++i)
-    {
-      int target = VLITE_FRAME_RATE - 1;
-      if (last_sample[i] !=  target)
-      {
-        multilog (log, LOG_ERR,
-          "Found skipped data in dispatch!  Aborting this observation.\n");
-        major_skip = 1; // TODO -- make this more descriptive
-        //size_t idx = VLITE_RATE*i + last_sample[i]*VD_DAT;
-        //memset(udat+idx,0,(target-last_sample[i])*VD_DAT);
-        break;
-      }
-      last_sample[i] = -1;
-    }
 
     // do dispatch -- break into chunks to fit in GPU memory; this is
     // currently 100 milliseconds
@@ -1329,7 +1242,7 @@ int main (int argc, char *argv[])
       #if PROFILE
       cudaEventRecord (start,0);
       #endif 
-      size_t maxn = (fft_per_chunk*NCHAN)/polfac;
+      maxn = (fft_per_chunk*NCHAN)/polfac;
       if (npol==1) {
         if (RFI_MODE == 0 || RFI_MODE == 2)
         {
@@ -1486,6 +1399,31 @@ int main (int argc, char *argv[])
           }
         }
       }
+      if(key_co && cobuffer_ok) {
+        char* outbuff = RFI_MODE==2? (char*)fft_trim_u_kur_hst:
+                                     (char*)fft_trim_u_hst;
+        // compute the # free buffers
+        ipcio_t* ipc = hdu_co->data_block;
+        uint64_t m_nbufs = ipcbuf_get_nbufs ((ipcbuf_t *)ipc);
+        uint64_t m_full_bufs = ipcbuf_get_nfull((ipcbuf_t*) ipc);
+        if (m_full_bufs == (m_nbufs - 1))
+        {
+          cobuffer_ok = 0;
+          dadacheck (dada_hdu_unlock_write (hdu_out[active_buffer]));
+          multilog (log, LOG_ERR, "Only one free buffer left!  Aborting output to coadder.\n");
+        }
+        else
+        {
+          size_t written = ipcio_write (
+              ipc,outbuff,maxn);
+          if (written != maxn)
+          {
+            multilog (log, LOG_ERR, "Tried to write %lu bytes to output coadder buffer but only wrote %lu.", maxn, written);
+            fprintf (stderr, "Tried to write %lu bytes to output coadder buffer but only wrote %lu.", maxn, written);
+            exit (EXIT_FAILURE);
+          }
+        }
+      }
 
       // TODO -- tune this I/O.  The buffer size is set to 8192, but
       // according to fstat the nfs wants a block size of 1048576! Each
@@ -1553,60 +1491,16 @@ int main (int argc, char *argv[])
       rebuild_fp[active_buffer] = popen (rebuild_cmd, "r");
       buffer_ok[active_buffer] = 0;
     }
+  }
 
-  if(key_co) {
-    char* outbuff = RFI_MODE==2? (char*)fft_trim_u_kur_hst:
-    (char*)fft_trim_u_hst;
-    ipcio_t* ipc = hdu_co->data_block;
-    uint64_t m_nbufs = ipcbuf_get_nbufs ((ipcbuf_t *)ipc);
-    uint64_t m_full_bufs = ipcbuf_get_nfull((ipcbuf_t*) ipc);
-    if (m_full_bufs == (m_nbufs - 1))
-    {
-      dadacheck (dada_hdu_unlock_write (hdu_co));
-      multilog (log, LOG_ERR, "Only one free buffer left!  Aborting output to coadder and clearing buffer.\n");
-    }
-    else
-    {
-      size_t written = ipcio_write (
-        hdu_co->data_block,outbuff,maxn);
-      if (written != maxn)
-      {
-        multilog (log, LOG_ERR, "Tried to write %lu bytes to coadd psrdada buffer but only wrote %lu.", maxn, written);
-        fprintf (stderr, "Tried to write %lu bytes to coadd psrdada buffer but only wrote %lu.", maxn, written);
-        exit (EXIT_FAILURE);
-      }
-    }
+  if(key_co && cobuffer_ok) {
+    multilog(log, LOG_INFO, "process_baseband: coadd before dada_hdu_unlock_write\n");
+    dadacheck( dada_hdu_unlock_write(hdu_co));
+    multilog(log, LOG_INFO, "process_baseband: coadd after dada_hdu_unlock_write\n");
   }
     // increment active buffer
     if (NOUTBUFF == ++active_buffer)
       active_buffer = 0;
-  }
-
-  // before disconnecting from input buffer, make sure we haven't aborted
-  // due to a skip; if we have, we need to keep reading from the buffer
-  // or else it will fill up and block forever
-  if (major_skip) {
-    multilog (log, LOG_INFO, "Reading from buffer to clear major skip.\n");
-    major_skip = 0;
-    // NB can't use ipcbuf_mark_cleared here because writer may write
-    // for an arbitrarily long time, so best just to read until the buffer
-    // is empty and eod is raised, viz nread==0
-    while (true) {
-      ssize_t nread = ipcio_read (hdu_in->data_block,frame_buff,VD_FRM);
-      if (nread < 0 ) {
-        multilog (log, LOG_ERR, "Error on nread on major skip clear.\n");
-        // TODO -- exit more gracefully here?
-        return (EXIT_FAILURE);
-      }
-      if (nread != VD_FRM) {
-        if (nread != 0)
-          multilog (log, LOG_INFO,
-            "Packet size=%ld, expected %ld on major skip clear.\n",
-            nread,VD_FRM);
-        break;
-      }
-    }
-  }
 
   dadacheck (dada_hdu_unlock_read (hdu_in));
 
@@ -1691,6 +1585,11 @@ int main (int argc, char *argv[])
       dada_hdu_disconnect (hdu_out[i]);
       dada_hdu_destroy (hdu_out[i]);
     }
+  }
+  if(key_co) {
+    fprintf(stderr, "Coadd DADA disconnect!\n");
+    dada_hdu_disconnect(hdu_co);
+    dada_hdu_destroy(hdu_co);
   }
 
   // free memory

@@ -155,7 +155,7 @@ int main(int argc, char** argv)
   //int ant_on_src = 0;
   int recording = 0;
 
-		  ScanInfoDocument D; //multicast message struct
+  ScanInfoDocument D; //multicast message struct
   const ObservationDocument *od;
   AlertDocument A; 
   AntPropDocument last_antprop; // keep a copy of antenna properties

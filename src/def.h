@@ -6,11 +6,13 @@
 #define CMD_QUIT  'Q'
 #define CMD_EVENT 'E'
 #define CMD_NONE  'N'
+#define CMD_FAKE_START  'F'
+#define CMD_FAKE_STOP  'G'
 
 #define STATE_STARTED 201
 #define STATE_STOPPED 202
 
-#define VDIF_PKT_SIZE 5032
+#define VDIF_FRAME_SIZE 5032
 #define UDP_HDR_SIZE 42
 
 #define SRCMAXSIZE 32
@@ -18,6 +20,7 @@
 #define ETHDEV "eth0"
 
 #define MAXFRAMENUM 25599
+#define FRAMESPERSEC 26000
 
 #define EVENTDIR "/mnt/ssd/dumps"
 #define LOGDIR "/home/vlite-master/mtk/logs"

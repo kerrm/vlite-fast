@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <pthread.h>
+#include <math.h>
 
 #include "dada_def.h"
 #include "dada_hdu.h"
@@ -17,6 +18,9 @@
 #include "executor.h"
 #include "vdifio.h"
 #include "multicast.h"
+
+#define MSGMAXSIZE 8192
+#define OD_CACHE_SIZE 15
 
 static FILE* logfile_fp = NULL;
 
@@ -68,6 +72,7 @@ int write_psrdada_header(dada_hdu_t* hdu, vdif_header* hdr, ObservationDocument*
   char dada_utc[64];
   strftime (dada_utc, 64, DADA_TIMESTR, utc_time);
   dadacheck (ascii_header_set (ascii_hdr, "UTC_START", "%s", dada_utc) );
+  dadacheck (ascii_header_set (ascii_hdr, "UNIX_TIMET", "%ld", epoch_seconds) );
   multilog (hdu->log, LOG_INFO, "psrdada header:\n%s",ascii_hdr);
   ipcbuf_mark_filled (hdu->header_block, 4096);
   return 0;
@@ -127,6 +132,52 @@ void fprint_observation_document(FILE* fd, ObservationDocument* od)
   fprintf(fd,"    usesPband = %d\n", od->usesPband);
 }
 
+/*
+ * Fill the ObservationDocument pointed to with fake values.  If the scan
+ * time is set correctly, this will initiate or terminate data taking.
+ * To terminate, specify finish==True.
+ */
+void fake_observation_document (ObservationDocument* od, double scan_start,
+  int finish)
+{
+  od->startTime = scan_start; // in decimal/double MJD(UTC)
+  if (finish)
+		snprintf(od->name,OBSERVATION_NAME_SIZE,"FINISH");
+  else
+		snprintf(od->name,OBSERVATION_NAME_SIZE,"FAKE");
+  od->ra = 1;
+  od->dec = 1;
+}
+
+// TODO -- currently, we are only signalling stop by EOD.  I think
+// this is good, but we need to ensure consistency with PB, such that
+// the voltage buffer doesn't fill up if PB for some reason aborts
+// early.  Potentially could be handle by a multicast message.  Or just
+// quit and restart...
+
+int stop_observation (dada_hdu_t* hdu, multilog_t* log, 
+    uint64_t* packets_written, int* state)
+{
+  if (*state != STATE_STARTED)
+    return 1;
+
+  *state = STATE_STOPPED;
+  if (dada_hdu_unlock_write (hdu) < 0) {
+    multilog (log, LOG_ERR,
+        "[STATE_STARTED->STOP]: unable to unlock psrdada HDU, exiting\n");
+    return 0;
+  }
+  multilog (log, LOG_INFO,
+      "[STATE_STARTED->STOP] Wrote %d packets to psrdada buffer.\n",*packets_written);
+  *packets_written = 0;
+  return 1;
+}
+
+/*
+ * Return all buffers that have not yet been written out and that overlap
+ * any of the trigger window.  By fiat, all buffers are now aligned to a
+ * UTC second.
+ */
 int get_buffer_trigger_overlap (char** bufs, int nbufs,
     trigger_t** tqueue, time_t* dump_times,
     char** bufs_to_write, time_t* times_to_write)
@@ -137,6 +188,8 @@ int get_buffer_trigger_overlap (char** bufs, int nbufs,
   for (int ibuf=0; ibuf < nbufs; ++ibuf)
   {
     // get time for frame at start of buffer
+    // TODO -- we can actually cache the seconds when we do the 1-s
+    // boundary, since we create alignment by design.  Leave for now.
     vdif_header* vdhdr = (vdif_header*) bufs[ibuf];
     time_t utc_seconds;
     double buf_t0 = vdif_to_dunixepoch (vdhdr, &utc_seconds); // beginning of buffer
@@ -160,6 +213,9 @@ int get_buffer_trigger_overlap (char** bufs, int nbufs,
     {
       if (tqueue[itrig] == NULL)
         break;
+      // condition for overlap is 
+      // !((trigger_start > buffer_end) || (trigger_end < buffer_start)
+      // --> (trigger_start < buffer_end && trigger_end > buffer_start)
       if ((tqueue[itrig]->t0 <= (buf_t0+1)) &&
           (tqueue[itrig]->t1 >= buf_t0))
       {
@@ -192,6 +248,63 @@ int get_buffer_trigger_overlap (char** bufs, int nbufs,
   return nbuf_to_write;
 }
 
+/*
+ * Return the most recent ObservationDocument whose start time precedes
+ * the time of the VDIF packet.
+ */
+ObservationDocument* search_od_cache (ObservationDocument* first_od, int od_cache_size, double vdif_mjd)
+{
+  double best_time = 0;
+  ObservationDocument* best_od = NULL;
+  for (int i = 0; i < od_cache_size; ++i, ++first_od) 
+  {
+    if (first_od == NULL)
+    {
+      // this shouldn't actually happen since these are on the stack
+      fprintf (stderr,"should not see this\n");
+      continue;
+    }
+    if ( (first_od->startTime <= vdif_mjd) &&
+         (first_od->startTime > best_time) )
+    {
+      best_time = first_od->startTime;
+      best_od = first_od;
+    }
+  }
+  return best_od;
+}
+
+/*
+ * Check to see if the pointing position is close enough between scans
+ * to consider them contiguous.  This small amount allows for things
+ * like VLASS.  For speed, we are also ignoring projection effects!
+ */
+int check_od_consistency (ObservationDocument* od1, 
+    ObservationDocument* od2, multilog_t* log)
+{
+
+  // check for edge case of FINISH scan
+  if (strcasecmp (od2->name,"FINISH") == 0)
+    return 0;
+
+  double rtol = 0.00873; // 0.5 deg
+  double max_integ = 480; // 8 minutes
+  if ((fabs(od1->ra-od2->ra)< rtol) && fabs(od1->dec-od2->dec) < rtol)
+  {
+     double dt_sec = (od2->startTime - od1->startTime)*86400;
+     fprintf (stderr, "dt=%.2f\n",dt_sec);
+     if (dt_sec < max_integ)
+     {
+       multilog (log, LOG_INFO,
+           "Pointing unchanged, will continue to integrate.\n");
+       return 1;
+     }
+     multilog (log, LOG_INFO,
+         "Integration exceeded %lf s, starting a new one.\n", max_integ);
+  }
+  return 0;
+}
+
 int main(int argc, char** argv)
 {
   // register SIGINT handling
@@ -202,13 +315,22 @@ int main(int argc, char** argv)
   multilog_t* log = multilog_open ("writer",0);
   dada_hdu_t* hdu = dada_hdu_create (log);
 
-  //get this many bytes at a time from data socket
-  int BUFSIZE = UDP_HDR_SIZE + VDIF_PKT_SIZE; 
-  char buf[BUFSIZE];
+  // get this many bytes at a time from data socket
+  int FRAME_BUFSIZE = UDP_HDR_SIZE + VDIF_FRAME_SIZE; 
+  char frame_buff[FRAME_BUFSIZE];
+  char* vdif_buff = frame_buff + UDP_HDR_SIZE;
+  vdif_header* vdhdr = (vdif_header*) (vdif_buff);
   char dev[16] = ETHDEV;
   char hostname[MAXHOSTNAME];
   gethostname(hostname,MAXHOSTNAME);
   //char *starthost = strstr(hostname, "difx");
+
+  // keep track of received frames for checking for packet loss, and also
+  // of latest time based on VDIF packets (updates every 1s)
+  int last_frame[2] = {-2,-2};
+  int pause_seconds = 0;
+  int last_pause = 0;
+  double vdif_dmjd = -1;
   
   int state = STATE_STOPPED;
   //uint64_t port = WRITER_SERVICE_PORT;
@@ -257,7 +379,10 @@ int main(int argc, char** argv)
   tv_10ms.tv_usec = 10000;
 
   // observation metadata
-  ObservationDocument od;
+  ScanInfoDocument D; //multicast message struct
+  int od_cache_idx = 0;
+  ObservationDocument* current_od = NULL;
+  ObservationDocument od_cache[OD_CACHE_SIZE];
 
   // logging
   time_t currt;
@@ -277,6 +402,15 @@ int main(int argc, char** argv)
   if (stderr_output)
     multilog_add (log, stderr);
   printf("writing log to %s\n",logfile);
+
+  // print out command used to invoke
+  char* incoming_hdr = &frame_buff[0]; // borrow this buffer
+  strncpy (incoming_hdr, argv[0], FRAME_BUFSIZE-1);
+  for (int i = 1; i < argc; ++i) {
+    strcat (incoming_hdr, " ");
+    strncat (incoming_hdr, argv[i], 4095-strlen(incoming_hdr));
+  }
+  multilog (log, LOG_INFO, "[WRITER] invoked with: \n%s\n", incoming_hdr);
 
   // have a 1-1 mapping between threadios and recent dump times.  Given
   // size of the buffer, about 100 seems appropriate.
@@ -308,9 +442,9 @@ int main(int argc, char** argv)
   char mc_trigger_buf[sizeof(trigger_t)*MAX_TRIGGERS];
   trigger_t* trigger_queue[MAX_TRIGGERS] = {NULL};
   
-  char mc_info_buf[10000]; // TODO check this size
-  int mc_info_sock = open_mc_socket (mc_vlitegrp, MC_INFO_PORT,
-      "Observation Info [Writer]", NULL, log);
+  char mc_info_buf[MSGMAXSIZE];
+  int mc_info_sock = open_mc_socket (mc_vlitegrp, MULTI_OBSINFO_PORT,
+      "Observation Info [Writer]", &maxsock, log);
 
   // Open raw data stream socket
   Connection raw;
@@ -331,14 +465,12 @@ int main(int argc, char** argv)
   setsockopt (raw.svc, SOL_SOCKET, SO_RCVTIMEO,
       (const char *)&(tv_10ms), sizeof(tv_10ms));
 
-  int write_header = 0;
   //int write_voltages = 0;
   uint64_t packets_written = 0;
-  //uint64_t voltage_packets_written = 0;
-  //uint64_t voltage_packet_counter = 0;
-  ssize_t info_bytes_read = 0;
   ssize_t raw_bytes_read = 0;
   ssize_t ipcio_bytes_written = 0;
+
+  int break_loop = 0;
 
   while (1) {
 
@@ -355,6 +487,7 @@ int main(int argc, char** argv)
     FD_ZERO (&readfds);
     FD_SET (mc_control_sock, &readfds);
     FD_SET (mc_trigger_sock, &readfds);
+    FD_SET (mc_info_sock, &readfds);
     FD_SET (raw.svc, &readfds);
     if (select (maxsock+1,&readfds,NULL,NULL,&tv_500mus) < 0)
     {
@@ -364,6 +497,7 @@ int main(int argc, char** argv)
     }
     
     // if input is waiting on control socket, read it
+    // in principle only commands we accept now are trigger and quit
     if (FD_ISSET (mc_control_sock, &readfds))
     {
       fprintf (stderr, "receiving command\n");
@@ -373,84 +507,44 @@ int main(int argc, char** argv)
     else
       cmd = CMD_NONE;
 
-    // handle commands; NB that commands can be set in this loop as
-    // well as come in on the control socket
+    // CMD_START can now only be issued by comparing packets to scan starts
     if ((cmd == CMD_START) && (state == STATE_STOPPED))
     {
-      fprintf (stderr, "here1\n");
-      fflush (stderr);
-      multilog (log, LOG_INFO,"[STATE_STOPPED->START]\n");
-      // start an observation
-      state = STATE_STARTED;
-      packets_written = 0;
-      // TODO -- block here until we get the observation info
-      // TODO -- need to handle case of multiple observation documents
-      info_bytes_read = read (mc_info_sock, mc_info_buf, 1024);
-      multilog (log, LOG_INFO, "Read %d bytes from fd %d, expected %d.\n", 
-          info_bytes_read,mc_info_sock,sizeof(ObservationDocument));
-      // TODO -- what could happen here if heimdall runs behind, or if 
-      // we have a long transient dump, is that we receive multiple ODs?
-      // so check for a multiple of sizeof(OD) and then use the last one
-      if (info_bytes_read != sizeof(ObservationDocument)) {
-        // TODO will have to decide how to handle this error
-        multilog (log, LOG_ERR, "Not a valid ObservationDocument!\n");
-      }
-      else {
-        memcpy (&od, mc_info_buf, sizeof(ObservationDocument));
-        char result[2048];
-        print_observation_document (result,&od);
-        multilog (log, LOG_INFO, "ObservationDocument:\n%s", result);
-      }
-      if (dada_hdu_lock_write (hdu) < 0) {
-        multilog (log, LOG_ERR, "Unable to lock psrdada HDU, exiting\n");
-        exit (EXIT_FAILURE);
-      }
-      write_header = 1;
-      multilog (log, LOG_INFO, "After dada_hdu_lock_write\n");
-      fflush (logfile_fp);
-
-      // TODO -- recreate dumping here, but using trigger socket instead
-      /*
-      if (write_voltages)
-      {
-        dump_time = 0;
-        multilog (log, LOG_INFO, "Recording voltages for %s.\n",od.name);
-      }
-
-      // otherwise, check for a set source to trigger on
-      int do_dump = (write_voltages==0) & dump_check_name (od.name,od.datasetId);
-      // dump a maximum of 3 times on known sources
-      if (do_dump > 0 && do_dump < 3) {
-        dump_time = time (NULL);
-        multilog (log, LOG_INFO, "Setting a dump time %ld for %s.\n",
-            dump_time, od.name);
-      }
-      */
+      multilog (log, LOG_ERR, "[Main Control Loop] rxed CMD_START.");
+      exit (EXIT_FAILURE);
     }
 
+    // CMD_STOP can now only be issued by comparing packets to scan starts
     if ((cmd == CMD_STOP) && (state == STATE_STARTED))
     {
-      fprintf (stderr, "here2\n");
-      fflush (stderr);
-      //CMD_STOP --> change state to STOPPED, close data block
-      state = STATE_STOPPED;
-      if (dada_hdu_unlock_write (hdu) < 0) {
-        multilog (log, LOG_ERR,
-            "[STATE_STARTED->STOP]: unable to unlock psrdada HDU, exiting\n");
-        exit_status = EXIT_FAILURE;
-        break;
-      }
-      multilog (log, LOG_INFO, 
-          "[STATE_STARTED->STOP] Wrote %d packets to psrdada buffer.\n",packets_written);
-      packets_written = 0;
-      fflush (logfile_fp);
-      continue;
+      multilog (log, LOG_ERR, "[Main Control Loop] rxed CMD_STOP.");
+      exit (EXIT_FAILURE);
+    }
+    
+    //
+    if ((cmd == CMD_FAKE_START) && (state == STATE_STOPPED))
+    {
+      od_cache_idx += 1;
+        if (od_cache_idx == OD_CACHE_SIZE)
+          od_cache_idx = 0;
+      fake_observation_document (&od_cache[od_cache_idx], vdif_dmjd, 0);
+      multilog (log, LOG_INFO,
+          "Inserting a fake START observation document.\n");
+    }
+
+    if ((cmd == CMD_FAKE_STOP) && (state == STATE_STARTED))
+    //if ((cmd == CMD_FAKE_STOP))
+    {
+      od_cache_idx += 1;
+        if (od_cache_idx == OD_CACHE_SIZE)
+          od_cache_idx = 0;
+      fake_observation_document (&od_cache[od_cache_idx], vdif_dmjd, 1);
+      multilog (log, LOG_INFO,
+          "Inserting a fake FINISH observation document.\n");
     }
 
     if (cmd == CMD_QUIT)
     {
-      fprintf (stderr, "here3\n");
-      fflush (stderr);
       if (state == STATE_STARTED)
       {
         multilog (log, LOG_INFO,"[STATE_STARTED->QUIT], exiting.\n");
@@ -462,17 +556,43 @@ int main(int argc, char** argv)
       break;
     }
 
+    // check for a new scan message
+    if (FD_ISSET (mc_info_sock, &readfds))
+    {
+      int nbytes = MultiCastReceive (
+          mc_info_sock, mc_info_buf, MSGMAXSIZE, NULL);
+      if (nbytes <= 0) {
+        multilog (log, LOG_ERR,
+            "Error on Obsinfo socket, return value = %d\n",nbytes);
+        exit (EXIT_FAILURE);
+      }
+      parseScanInfoDocument (&D, mc_info_buf);
+      if (D.type == SCANINFO_OBSERVATION)
+      {
+        printScanInfoDocument (&D);
+        od_cache_idx += 1;
+        if (od_cache_idx == OD_CACHE_SIZE)
+          od_cache_idx = 0;
+        ObservationDocument* od = &od_cache[od_cache_idx];
+        // check to see if we have run out of room in the OD cache
+        if (od == current_od)
+        {
+          multilog (log, LOG_ERR,
+              "Attempting to overwrite current ObservationDocument!");
+          exit (EXIT_FAILURE);
+        }
+        memcpy (od, &D.data.observation, sizeof(ObservationDocument));
+        // write to log or file?
+      }
+    }
+
     // check for triggers
     if (FD_ISSET (mc_trigger_sock, &readfds))
     {
-      fprintf (stderr, "here4\n");
-      fflush (stderr);
-      int nbytes = MultiCastReceive (
-          mc_trigger_sock, mc_trigger_buf, sizeof(trigger_t)*MAX_TRIGGERS, mc_from);
+      int nbytes = MultiCastReceive (mc_trigger_sock, mc_trigger_buf,
+          sizeof(trigger_t)*MAX_TRIGGERS, mc_from);
       int ntrigger = nbytes / sizeof(trigger_t);
       multilog (log, LOG_INFO, "Received %d triggers.\n", ntrigger);
-      fprintf (stderr, "Received %d triggers.\n", ntrigger);
-      fflush (stderr);
       if (ntrigger > MAX_TRIGGERS)
       {
         multilog (log, LOG_INFO, "Truncating trigger list to fit.\n");
@@ -558,50 +678,151 @@ int main(int argc, char** argv)
       // To reduce CPU utilization, read multiple packets.
       for (int ipacket = 0; ipacket < 20; ++ipacket) {
 
-        raw_bytes_read = recvfrom (raw.svc, buf, BUFSIZE, 0, 
+        raw_bytes_read = recvfrom (raw.svc, frame_buff, FRAME_BUFSIZE, 0, 
             (struct sockaddr *)&(raw.rem_addr), &(raw.alen));
 
-        if (raw_bytes_read == BUFSIZE)
+        if (raw_bytes_read != FRAME_BUFSIZE)
         {
-          if (state != STATE_STARTED)
-            continue; // move to next packet
+          if (raw_bytes_read <= 0)
+            multilog (log, LOG_ERR,
+                "Raw socket read failed: %d\n.", raw_bytes_read);
+          else
+            multilog (log, LOG_ERR,
+                "Received packet size: %d, ignoring.\n", raw_bytes_read);
+          fflush (logfile_fp);
+          cmd = CMD_STOP; // TODO check for observation and stop as necessary
+          pause_seconds = 1; // TODO CHECK
+          continue;
+        }
+        else
+        {
+          int thread = getVDIFThreadID (vdhdr) != 0; // TODO -- check this convention
+          int current_frame = getVDIFFrameNumber (vdhdr);
 
-          if (write_header) {
-            multilog (log, LOG_INFO, "Writing psrdada header.\n");
-            write_psrdada_header (
-                hdu, (vdif_header *)(buf + UDP_HDR_SIZE), &od);
-            write_header = 0;
+          // check if we are on a one-second boundary with thread==0
+          if ((thread==0) && (MAXFRAMENUM == last_frame[thread]))
+          {
+            vdif_dmjd = getVDIFFrameDMJD (vdhdr, FRAMESPERSEC);
+            //fprintf (stderr, "Found one second boundary with vdif_dmjd=%f.\n",vdif_dmjd);
+            
+            // reset sample counter
+            last_frame[0] = -1;
+            last_frame[1] = -1;
+
+            if (pause_seconds > 0)
+            {
+              pause_seconds -= 1;
+              // this is a little klugey, because we are skipping the current_frame setting
+              // below.  Maybe figure out a better way to do this logic.
+              last_frame[0] = 0;
+              last_frame[1] = -1;
+              continue;
+            }
+
+            // check buffer start/stop times and issue any observation
+            // changes as necessary
+            ObservationDocument* best_match = search_od_cache (
+                &od_cache[0], OD_CACHE_SIZE, vdif_dmjd);
+            if (best_match != current_od)
+            {
+
+              fprintf (stderr,"Found a newer observation document.\n");
+              fprint_observation_document (stderr,best_match);
+
+              // If already recording, check to see if new scan is consistent
+              // with the old one.  If not, stop the observation.
+              if (state==STATE_STARTED)
+              {
+                if (!check_od_consistency (current_od, best_match, log))
+                {
+                  fprintf (stderr, "ODs are inconsistent.\n");
+                  if (!stop_observation (hdu, log, &packets_written, &state))
+                  {
+                    exit_status = EXIT_FAILURE;
+                    break_loop = 1;
+                    break;
+                  }
+                }
+              }
+
+              current_od = best_match;
+
+              // Start new observation (unless FINISH).
+              if (strcasecmp (current_od->name, "FINISH") != 0) 
+              {
+                multilog (log, LOG_INFO,"[STATE_STOPPED->START]\n");
+                state = STATE_STARTED;
+                packets_written = 0;
+
+                if (dada_hdu_lock_write (hdu) < 0) {
+                  multilog (log, LOG_ERR, 
+                      "Unable to lock psrdada HDU, exiting\n");
+                  exit (EXIT_FAILURE);
+                }
+              
+                multilog (log, LOG_INFO, "Writing psrdada header.\n");
+                write_psrdada_header (hdu, vdhdr, best_match);
+              }
+            }
+
           }
 
-          ipcio_bytes_written = ipcio_write (
-              hdu->data_block,buf+UDP_HDR_SIZE, VDIF_PKT_SIZE);
+          // CHECK FOR SKIPS IN DATA
+          //
+          // initially buffer is full, so we will drop packets at startup.
+          // Any time we drop packets, we want to have a pause to attempt
+          // to catch up, and we can handle both problems by allowing the
+          // startup to trigger a pause.
 
-          if (ipcio_bytes_written != VDIF_PKT_SIZE) {
+          if (((current_frame - last_frame[thread]) != 1) && (pause_seconds == 0))
+          {
+            pause_seconds = last_pause + 1;
+            last_pause = pause_seconds;
+            if (last_pause > 10)
+            {
+              multilog (log, LOG_ERR, "TOO many skips.  Aborting process.\n");
+              exit_status =  EXIT_FAILURE;
+              break_loop = 1;
+              break; // break out of multi-packet loop
+            }
+            if (pause_seconds > 1)
+              multilog (log, LOG_ERR, "Detected a skip!  Aborting observation and pausing %d seconds before resuming data taking.\n",pause_seconds);
+
+            if (!stop_observation (hdu, log, &packets_written, &state))
+            {
+              exit_status = EXIT_FAILURE;
+              break_loop = 1;
+              break; // break out of multi-packet loop
+            }
+          }
+          
+          // update sample counter
+          last_frame[thread] = current_frame;
+
+          if (state != STATE_STARTED)
+            continue;
+
+          ipcio_bytes_written = ipcio_write (
+              hdu->data_block,vdif_buff, VDIF_FRAME_SIZE);
+
+          if (ipcio_bytes_written != VDIF_FRAME_SIZE) {
             multilog (log, LOG_ERR,
                 "Failed to write VDIF packet to psrdada buffer.\n");
-            exit_status = EXIT_FAILURE;
-            break;
+            exit (EXIT_FAILURE);
           }
           else
             packets_written++;
-        }
-        else if (raw_bytes_read <= 0) {
-          multilog (log, LOG_ERR,
-              "Raw socket read failed: %d\n.", raw_bytes_read);
-          fflush (logfile_fp);
-          cmd = CMD_STOP;
-          break; // break from multi-packet loop
-        }
-        else {
-          multilog (log, LOG_ERR,
-              "Received packet size: %d, ignoring.\n", raw_bytes_read);
-          fflush (logfile_fp);
-          cmd = CMD_STOP;
-          break; // break from multi-packet loop
-        }
+        } // end check on frame buffer consumptionn
       } // end multiple packet read
     } // end raw socket read logic
 
+    if (break_loop)
+    {
+      multilog (log, LOG_INFO, "Breaking main loop by request.\n");
+      if (!stop_observation (hdu, log, &packets_written, &state))
+        exit_status = EXIT_FAILURE;
+      break;
+    }
   } // end main loop over state/packets
   
   shutdown (mc_control_sock,2);
