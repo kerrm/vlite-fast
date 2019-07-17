@@ -8,12 +8,13 @@ PARSE_HEADERS = defaults.h  eop.h  executor.h  options.h  vlaant.h  vlite_xml.h 
 #F77 = gfortran -std=legacy -ffixed-line-length-none 
 CC = gcc
 #NVCC = nvcc
-NVCC = /usr/cuda-9.2.88/bin/nvcc -DDCOADD
+NVCC = /usr/cuda-9.2.88/bin/nvcc 
 CUDA_ARCH = -gencode arch=compute_35,code=sm_35 -gencode arch=compute_52,code=sm_52 -gencode arch=compute_61,code=sm_61
 #CUDA_DIR = /usr/cuda
 CUDA_DIR = /usr/cuda-9.2.88
 MAKE_PACKAGE_DIR = /home/vlite-master/mtk
-PACKAGE_DIR = /home/vlite-master/surya
+#PACKAGE_DIR = /home/vlite-master/surya
+PACKAGE_DIR = /home/vlite-master/mtk
 
 all: process_baseband genbase readbase messenger writer
 
@@ -47,10 +48,9 @@ messenger:	messenger.c def.h utils.o $(PARSE_FILES)
 	gcc -o $@ messenger.o utils.o $(PARSE_OBJ) -L${MAKE_PACKAGE_DIR}/lib -lexpat -lpsrdada
 	chmod a+rx $@
 
-writer:	writer.c def.h utils.o multicast.o
-	gcc -g -O2 -Wall -std=gnu99 -pthread -c writer.c -I${MAKE_PACKAGE_DIR}/include -I$(INCDIFXMESSAGE)
-	#gcc -o $@ writer.o utils.o multicast.o -pthread -L${MAKE_PACKAGE_DIR}/lib -lpsrdada -lvdifio
-	gcc -o $@ writer.o utils.o multicast.o -pthread -L${MAKE_PACKAGE_DIR}/lib -lpsrdada -lvdifio -Wl,-rpath /home/vlite-master/mtk/lib
+writer:	writer.c def.h utils.o $(PARSE_FILES)
+	gcc -g -O2 -Wall -std=gnu99 -pthread -c writer.c $(PARSE_FILES) -I${MAKE_PACKAGE_DIR}/include -I$(INCDIFXMESSAGE)
+	gcc -o $@ writer.o utils.o $(PARSE_OBJ) -pthread -L${MAKE_PACKAGE_DIR}/lib -lpsrdada -lvdifio -lexpat -Wl,-rpath /home/vlite-master/mtk/lib
 	chmod a+rx $@
 
 util.o: util.h util.c
