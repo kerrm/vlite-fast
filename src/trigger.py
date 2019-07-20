@@ -49,9 +49,14 @@ def trigger(all_cands,snthresh=8,minbeam=3,wmax=0.01,dmmin=70):
     triggers = []
     coincident_count = 0
     good_count = 0
+    we = [1e100,-1e100]
     for cand in all_cands:
         nbeam = (cand.beam_mask>0).sum() 
         coincident_count += nbeam > 1
+        if cand.width < we[0]:
+            we[0] = cand.width
+        if cand.width > we[1]:
+            we[1] = cand.width
         c1 = nbeam >= minbeam
         c2 = cand.width < wmax
         c3 = cand.dm > dmmin
@@ -59,6 +64,7 @@ def trigger(all_cands,snthresh=8,minbeam=3,wmax=0.01,dmmin=70):
         good_count += c2 and c3 and c4
         if (c1 and c2 and c3 and c4):
             triggers.append(cand)
+    print 'min/max width: ',we[0],we[1]
     print 'len(all_cands)=%d'%(len(all_cands))
     print 'coincident_count = %d'%(coincident_count)
     print 'good_count = %d'%(good_count)
@@ -139,7 +145,7 @@ if __name__ == '__main__':
 
         # get triggers
         sent_triggers = utc_sent_triggers[utc]
-        current_triggers = trigger(all_cands,snthresh=7.5,minbeam=4,wmax=0.15,dmmin=25)
+        current_triggers = trigger(all_cands,snthresh=7.5,minbeam=2,wmax=0.5,dmmin=20)
         new_triggers = set(current_triggers).difference(sent_triggers)
         print 'new_triggers len: ',len(new_triggers) # DEBUG
 
@@ -169,3 +175,4 @@ if __name__ == '__main__':
             send_trigger(t)
             sent_triggers.add(trig)
 
+# TODO shut down socket on interrupt
