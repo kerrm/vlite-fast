@@ -23,6 +23,8 @@
 #define OD_CACHE_SIZE 15
 
 static FILE* logfile_fp = NULL;
+static struct timespec ts_1ms;
+static const char cmdstop[] = {CMD_STOP};
 
 void usage ()
 {
@@ -138,14 +140,23 @@ void fprint_observation_document(FILE* fd, ObservationDocument* od)
  * To terminate, specify finish==True.
  */
 void fake_observation_document (ObservationDocument* od, double scan_start,
-  int finish)
+  int finish, int change_ra)
 {
+  static double last_ra = 0;
   od->startTime = scan_start; // in decimal/double MJD(UTC)
   if (finish)
 		snprintf(od->name,OBSERVATION_NAME_SIZE,"FINISH");
   else
 		snprintf(od->name,OBSERVATION_NAME_SIZE,"FAKE");
-  od->ra = 1;
+  if (change_ra)
+  {
+    od->ra = last_ra;
+    last_ra += 0.1;
+    if (last_ra > 3.14*2)
+      last_ra = 0;
+  }
+  else
+    od->ra = 1;
   od->dec = 1;
 }
 
@@ -170,6 +181,21 @@ int stop_observation (dada_hdu_t* hdu, multilog_t* log,
   multilog (log, LOG_INFO,
       "[STATE_STARTED->STOP] Wrote %d packets to psrdada buffer.\n",*packets_written);
   *packets_written = 0;
+
+  nanosleep (&ts_1ms, NULL);
+  return 1;
+}
+
+// signal other writers to stop observation, if started
+int mc_stop_observation (dada_hdu_t* hdu, multilog_t* log, int* state)
+{
+  if (*state != STATE_STARTED)
+    return 1;
+  if (MulticastSend (mc_vlitegrp, MC_WRITER_PORT, cmdstop, 1) < 0)
+  {
+    multilog (log, LOG_ERR, "send: %s\n", strerror (errno));
+    return 0;
+  }
   return 1;
 }
 
@@ -326,6 +352,8 @@ int main(int argc, char** argv)
   // keep track of received frames for checking for packet loss, and also
   // of latest time based on VDIF packets (updates every 1s)
   int last_frame[2] = {-2,-2};
+  int time_since_timet = 10;
+  time_t packet_monitor_timet = 0;
   int pause_seconds = 0;
   int last_pause = 0;
   int obs_length = 0;
@@ -337,7 +365,6 @@ int main(int argc, char** argv)
   char cmd = CMD_NONE;
   int arg, maxsock = 0; 
   int stderr_output = 0;
-
   
   while ((arg = getopt(argc, argv, "hk:e:o")) != -1) {
     switch(arg) {
@@ -377,6 +404,9 @@ int main(int argc, char** argv)
   tv_10ms.tv_sec = 0;
   tv_10ms.tv_usec = 10000;
 
+  // for nanosleep
+  ts_1ms = get_ms_ts(1);
+
   // observation metadata
   ScanInfoDocument D; //multicast message struct
   int od_cache_idx = 0;
@@ -386,7 +416,7 @@ int main(int argc, char** argv)
   // logging
   time_t currt;
   struct tm tmpt;
-  currt = time(NULL);
+  currt = time (NULL);
   localtime_r (&currt,&tmpt);
   char currt_string[128];
   strftime (currt_string,sizeof(currt_string), "%Y%m%d_%H%M%S", &tmpt);
@@ -417,8 +447,10 @@ int main(int argc, char** argv)
   threadio_t* threadios[MAX_THREADIOS] = {NULL};
   time_t dump_times[MAX_THREADIOS] = {0};
   int dump_idx = 0; // index of next dump / threadio
-  char* bufs_to_write[MAX_TRIGGERS] = {NULL};
-  time_t times_to_write[MAX_TRIGGERS] = {0};
+  // this really needs to be the size of the number of buffers!
+  // but 100 here should be plenty
+  char* bufs_to_write[100] = {NULL};
+  time_t times_to_write[100] = {0};
 
   //Try to connect to existing data block
   dada_hdu_set_key (hdu,key);
@@ -448,7 +480,8 @@ int main(int argc, char** argv)
   // Open raw data stream socket
   Connection raw;
   raw.alen = sizeof(raw.rem_addr);
-  raw.sockoptval = 16*1024*1024; //size of data socket internal buffer
+  // size of data socket buffer; enough for 131 ms less overheads
+  raw.sockoptval = 32*1024*1024;
 
   raw.svc = openRawSocket (dev,0);
   if (raw.svc < 0) {
@@ -513,11 +546,15 @@ int main(int argc, char** argv)
       exit (EXIT_FAILURE);
     }
 
-    // CMD_STOP can now only be issued by comparing packets to scan starts
-    if ((cmd == CMD_STOP) && (state == STATE_STARTED))
+    // must accept CMD_STOP to handle skips on other nodes
+    if (cmd == CMD_STOP)
     {
-      multilog (log, LOG_ERR, "[Main Control Loop] rxed CMD_STOP.");
-      exit (EXIT_FAILURE);
+      if (!stop_observation (hdu, log, &packets_written, &state))
+      {
+        exit_status = EXIT_FAILURE;
+        break_loop = 1;
+        break;
+      }
     }
     
     //
@@ -527,7 +564,7 @@ int main(int argc, char** argv)
       od_cache_idx += 1;
         if (od_cache_idx == OD_CACHE_SIZE)
           od_cache_idx = 0;
-      fake_observation_document (&od_cache[od_cache_idx], vdif_dmjd, 0);
+      fake_observation_document (&od_cache[od_cache_idx], vdif_dmjd, 0, 1);
       multilog (log, LOG_INFO,
           "Inserting a fake START observation document.\n");
     }
@@ -538,7 +575,7 @@ int main(int argc, char** argv)
       od_cache_idx += 1;
         if (od_cache_idx == OD_CACHE_SIZE)
           od_cache_idx = 0;
-      fake_observation_document (&od_cache[od_cache_idx], vdif_dmjd, 1);
+      fake_observation_document (&od_cache[od_cache_idx], vdif_dmjd, 1, 0);
       multilog (log, LOG_INFO,
           "Inserting a fake FINISH observation document.\n");
     }
@@ -580,7 +617,8 @@ int main(int argc, char** argv)
         {
           multilog (log, LOG_ERR,
               "Attempting to overwrite current ObservationDocument!");
-          exit (EXIT_FAILURE);
+          exit_status = EXIT_FAILURE;
+          break; // break out of main loop
         }
         memcpy (od, &D.data.observation, sizeof(ObservationDocument));
         // write to log or file?
@@ -632,7 +670,6 @@ int main(int argc, char** argv)
           "Dumping out %d buffers with the following UTC timestamps:\n",nbufs_to_write);
       for (int ibuf=0; ibuf < nbufs_to_write; ++ibuf)
       {
-
         threadio_t* tio = threadios[dump_idx];
         if (tio != NULL)
         {
@@ -650,6 +687,13 @@ int main(int argc, char** argv)
         }
 
         tio = (threadio_t*)(malloc (sizeof (threadio_t)));
+        if (tio==NULL)
+        {
+          multilog (log, LOG_ERR, "Unable to allocate ThreadIO mem.");
+          exit_status = EXIT_FAILURE;
+          break_loop = 1;
+          break;
+        }
         tio->status = -1;
         tio->buf = bufs_to_write[ibuf];
         tio->bufsz = bufsz;
@@ -659,6 +703,14 @@ int main(int argc, char** argv)
             EVENTDIR,currt_string,sid,times_to_write[ibuf]);
         multilog (log, LOG_INFO, ".... UTC %li writing to %s\n",
             times_to_write[ibuf], tio->fname);
+        // TODO -- could actually do a better job of this since we KNOW how far
+        // a given buffer is from dropping off the end of the ring buffer, and
+        // rather than launching the threads all at once, we can either launch them
+        // staggered over time (on the 1-s boundaries) or at least in between 20-packet
+        // reads so that we don't overflow the raw socket buffer
+        // TODO also -- we can make the dump threads less problematic if we use
+        // zero copy by memory mapping the output file to the system memory and
+        // faulting it
         if (pthread_create (&tio->tid, NULL, &buffer_dump, (void*)tio) != 0)
             multilog (log, LOG_ERR, "pthread_create failed\n");
         if (pthread_detach (tio->tid) != 0)
@@ -685,15 +737,25 @@ int main(int argc, char** argv)
         if (raw_bytes_read != FRAME_BUFSIZE)
         {
           if (raw_bytes_read <= 0)
+          {
             multilog (log, LOG_ERR,
                 "Raw socket read failed: %d\n.", raw_bytes_read);
+            exit_status = EXIT_FAILURE;
+            break_loop = 1;
+            break;
+          }
           else
-            multilog (log, LOG_ERR,
-                "Received packet size: %d, ignoring.\n", raw_bytes_read);
-          fflush (logfile_fp);
-          cmd = CMD_STOP; // TODO check for observation and stop as necessary
-          pause_seconds = 1; // TODO CHECK
-          continue;
+          {
+            multilog (log, LOG_ERR, "Received packet size: %d, aborting obs..\n", raw_bytes_read);
+            if (!mc_stop_observation (hdu, log, &state))
+            {
+              exit_status = EXIT_FAILURE;
+              break_loop = 1;
+              break;
+            }
+            pause_seconds = 1;
+            continue;
+          }
         }
         else
         {
@@ -709,6 +771,26 @@ int main(int argc, char** argv)
             // reset sample counter
             last_frame[0] = -1;
             last_frame[1] = -1;
+
+            // monitor synchronization between system time and packets
+            if (time_since_timet==10)
+              packet_monitor_timet = time (NULL);
+            time_since_timet -= 1;
+            if (time_since_timet==0)
+            {
+              time_t old_time = packet_monitor_timet;
+              packet_monitor_timet = time (NULL);
+              if ((packet_monitor_timet-old_time) > 11)
+              {
+                fprintf (stderr, "packet_monitor_time = %ld; old_time = %ld\n",packet_monitor_timet,old_time);
+                multilog (log, LOG_ERR, "Packet times and system time are out of synch by more than 1s!\n");
+                exit_status = EXIT_FAILURE;
+                break_loop = 1;
+                break;
+              }
+              time_since_timet = 10;
+            }
+
 
             if (pause_seconds > 0)
             {
@@ -738,8 +820,6 @@ int main(int argc, char** argv)
               int new_obs = 1;
               if (state==STATE_STARTED)
               {
-                // TODO -- as written this won't actually trigger on the max obs
-                // length, we could keep track of that locally.
                 if (!check_od_consistency (current_od, best_match, log, &obs_length))
                 {
                   // stop current observation if they are inconsistent
@@ -795,13 +875,16 @@ int main(int argc, char** argv)
               break; // break out of multi-packet loop
             }
             if (pause_seconds > 1)
+            {
               multilog (log, LOG_ERR, "Detected a skip!  Aborting observation and pausing %d seconds before resuming data taking.\n",pause_seconds);
 
-            if (!stop_observation (hdu, log, &packets_written, &state))
-            {
-              exit_status = EXIT_FAILURE;
-              break_loop = 1;
-              break; // break out of multi-packet loop
+              // signal all writers to stop
+              if (!mc_stop_observation (hdu, log, &state))
+              {
+                exit_status = EXIT_FAILURE;
+                break_loop = 1;
+                break;
+              }
             }
           }
           
@@ -821,7 +904,7 @@ int main(int argc, char** argv)
           }
           else
             packets_written++;
-        } // end check on frame buffer consumptionn
+        } // end check on raw socket read success
       } // end multiple packet read
     } // end raw socket read logic
 

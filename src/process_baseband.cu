@@ -217,6 +217,22 @@ int write_sigproc_header (FILE* output_fp, char* inchdr, vdif_header* vdhdr,int 
   return station_id;
 }
 
+void get_cofbfile (char* fbfile, ssize_t fbfile_len, char* inchdr, vdif_header* vdhdr)
+{
+  // Open up filterbank file using timestamp and antenna
+  int station_id = 99;
+  //ascii_header_get (inchdr, "STATIONID", "%d", &station_id);
+  char currt_string[128];
+  time_t epoch_seconds = vdif_to_unixepoch(vdhdr);
+  struct tm utc_time;
+  gmtime_r (&epoch_seconds, &utc_time);
+  strftime (currt_string,sizeof(currt_string), "%Y%m%d_%H%M%S", &utc_time);
+  *(currt_string+15) = 0;
+  if (CHANMIN < 2411)
+    snprintf (fbfile,fbfile_len,"%s/%s_muos_ea%02d.fil",DATADIR,currt_string,station_id);
+  else
+    snprintf (fbfile,fbfile_len,"%s/%s_ea%02d.fil",DATADIR,currt_string,station_id);
+}
 
 void get_fbfile (char* fbfile, ssize_t fbfile_len, char* inchdr, vdif_header* vdhdr)
 {
@@ -752,10 +768,12 @@ int main (int argc, char *argv[])
   }
 
   // Open up filterbank file at appropriate time
-  char fbfile[256];
+  char fbfile[256], cofbfile[256];
   get_fbfile (fbfile, 256, incoming_hdr, vdhdr);
-  char fbfile_kur[256];
+  get_cofbfile (cofbfile, 256, incoming_hdr, vdhdr);
+  char fbfile_kur[256], cofbfile_kur[256];
   change_extension (fbfile, fbfile_kur, ".fil", "_kur.fil");
+  change_extension (cofbfile, cofbfile_kur, ".fil", "_kur.fil");
 
   // use same scheme for ancillary data files
   #if DOHISTO
@@ -773,7 +791,9 @@ int main (int argc, char *argv[])
 
   // cache file name in case we need to change it to /dev/null
   char heimdall_file[256] = "";
+  char coheimdall_file[256] = "";
   strncpy (heimdall_file,RFI_MODE?fbfile_kur:fbfile,255);
+  strncpy (coheimdall_file,RFI_MODE?cofbfile_kur:cofbfile,255);
 
   // check for write to /dev/null and udpate file names if necessary
   int write_to_null = 0==write_fb;
@@ -931,7 +951,7 @@ int main (int argc, char *argv[])
     }
   }
   if(key_co && cobuffer_ok) {
-    write_psrdada_header(hdu_co, incoming_hdr, vdhdr, npol, heimdall_file); 
+    write_psrdada_header(hdu_co, incoming_hdr, vdhdr, npol, coheimdall_file); 
     fprintf(stderr, "Write Coadd header\n");
   }
 
