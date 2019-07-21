@@ -117,9 +117,20 @@ void print_observation_document(char* result, ObservationDocument* od)
 
 void fprint_observation_document(FILE* fd, ObservationDocument* od)
 {
+  // convert to hhmmss
+  double fracday = od->startTime-(int)od->startTime;
+  fracday *= 24;
+  int hh = (int)(fracday);
+  fracday -= hh;
+  fracday *= 60;
+  int mm = (int)(fracday);
+  fracday -= mm;
+  fracday *= 60;
+  int ss = (int)(fracday+0.5);
   fprintf(fd,"    datasetId = %s\n", od->datasetId);
   fprintf(fd,"    configId = %s\n", od->configId);
-  fprintf(fd,"    startTime = %10.8f\n", od->startTime);
+  fprintf(fd,"    startTime = %10.8f [%02d:%02d:%02d]\n", od->startTime,
+      hh, mm, ss);
   fprintf(fd,"    name = %s\n", od->name);
   fprintf(fd,"    ra = %10.8f\n", od->ra);
   fprintf(fd,"    dec = %10.8f\n", od->dec);
@@ -143,7 +154,7 @@ void fake_observation_document (ObservationDocument* od, double scan_start,
   int finish, int change_ra)
 {
   static double last_ra = 0;
-  od->startTime = scan_start; // in decimal/double MJD(UTC)
+  od->startTime = scan_start+1./86400; // in decimal/double MJD(UTC)
   if (finish)
 		snprintf(od->name,OBSERVATION_NAME_SIZE,"FINISH");
   else
@@ -186,6 +197,7 @@ int stop_observation (dada_hdu_t* hdu, multilog_t* log,
   return 1;
 }
 
+/* NO longer needed
 // signal other writers to stop observation, if started
 int mc_stop_observation (dada_hdu_t* hdu, multilog_t* log, int* state)
 {
@@ -198,6 +210,7 @@ int mc_stop_observation (dada_hdu_t* hdu, multilog_t* log, int* state)
   }
   return 1;
 }
+*/
 
 /*
  * Return all buffers that have not yet been written out and that overlap
@@ -275,29 +288,21 @@ int get_buffer_trigger_overlap (char** bufs, int nbufs,
 }
 
 /*
- * Return the most recent ObservationDocument whose start time precedes
- * the time of the VDIF packet.
+ * Return an ObservationDocument from the cache if its startTime matches
+ * the current second according to the VDIF stream.
  */
 ObservationDocument* search_od_cache (ObservationDocument* first_od, int od_cache_size, double vdif_mjd)
 {
-  double best_time = 0;
-  ObservationDocument* best_od = NULL;
+  // round VDIF timestamp to nearest second in the day
+  int vdif_sec = (int)(0.5+86400*(vdif_mjd-(int)vdif_mjd));
   for (int i = 0; i < od_cache_size; ++i, ++first_od) 
   {
-    if (first_od == NULL)
-    {
-      // this shouldn't actually happen since these are on the stack
-      fprintf (stderr,"should not see this\n");
-      continue;
-    }
-    if ( (first_od->startTime <= vdif_mjd) &&
-         (first_od->startTime > best_time) )
-    {
-      best_time = first_od->startTime;
-      best_od = first_od;
-    }
+    double od_mjd = first_od->startTime;
+    int od_sec = (int)(0.5+86400*(od_mjd-(int)od_mjd));
+    if (od_sec == vdif_sec)
+      return first_od;
   }
-  return best_od;
+  return NULL;
 }
 
 /*
@@ -355,7 +360,6 @@ int main(int argc, char** argv)
   int time_since_timet = 10;
   time_t packet_monitor_timet = 0;
   int pause_seconds = 0;
-  int last_pause = 0;
   int obs_length = 0;
   double vdif_dmjd = -1;
   
@@ -607,7 +611,8 @@ int main(int argc, char** argv)
       if (D.type == SCANINFO_OBSERVATION)
       {
         multilog (log, LOG_INFO, "Incoming ObservationDocument:\n");
-        printScanInfoDocument (&D);
+        //printScanInfoDocument (&D);
+        fprint_observation_document(stderr, &D.data.observation);
         od_cache_idx += 1;
         if (od_cache_idx == OD_CACHE_SIZE)
           od_cache_idx = 0;
@@ -746,14 +751,13 @@ int main(int argc, char** argv)
           }
           else
           {
-            multilog (log, LOG_ERR, "Received packet size: %d, aborting obs..\n", raw_bytes_read);
-            if (!mc_stop_observation (hdu, log, &state))
+            multilog (log, LOG_ERR, "Received anomalous packet size: %d, aborting obs.\n", raw_bytes_read);
+            if (!stop_observation (hdu, log, &packets_written, &state))
             {
               exit_status = EXIT_FAILURE;
               break_loop = 1;
               break;
             }
-            pause_seconds = 1;
             continue;
           }
         }
@@ -766,11 +770,13 @@ int main(int argc, char** argv)
           if ((thread==0) && (MAXFRAMENUM == last_frame[thread]))
           {
             vdif_dmjd = getVDIFFrameDMJD (vdhdr, FRAMESPERSEC);
-            //fprintf (stderr, "Found one second boundary with vdif_dmjd=%f.\n",vdif_dmjd);
             
             // reset sample counter
             last_frame[0] = -1;
             last_frame[1] = -1;
+
+            // unpause skip checking
+            pause_seconds = 0;
 
             // monitor synchronization between system time and packets
             if (time_since_timet==10)
@@ -791,36 +797,37 @@ int main(int argc, char** argv)
               time_since_timet = 10;
             }
 
-
-            if (pause_seconds > 0)
+            // monitor output buffer -- if full, abort
+            ipcio_t* ipc = hdu->data_block;
+            uint64_t m_nbufs = ipcbuf_get_nbufs ((ipcbuf_t *)ipc);
+            uint64_t m_full_bufs = ipcbuf_get_nfull((ipcbuf_t*) ipc);
+            if (m_full_bufs == (m_nbufs - 1))
             {
-              pause_seconds -= 1;
-              // this is a little klugey, because we are skipping the current_frame setting
-              // below.  Maybe figure out a better way to do this logic.
-              last_frame[0] = 0;
-              last_frame[1] = -1;
-              continue;
+              multilog (log, LOG_ERR, "[WRITER] Only one free buffer left!  Aborting process.");
+              exit_status = EXIT_FAILURE;
+              break_loop = 1;
+              break;
             }
 
             if (state == STATE_STARTED)
               obs_length += 1;
 
-            // check buffer start/stop times and issue any observation
-            // changes as necessary
-            ObservationDocument* best_match = search_od_cache (
+            // See if there is a new scan, defined such that the VDIF second
+            // and the startTIME ceilinged to the next second match
+            ObservationDocument* new_scan = search_od_cache (
                 &od_cache[0], OD_CACHE_SIZE, vdif_dmjd);
-            if (best_match != current_od)
+
+            if (new_scan != NULL)
             {
+              multilog (log, LOG_INFO, "Found a new scan at %10.8f.\n",
+                  new_scan->startTime);
 
-              multilog (log, LOG_INFO, "Found a newer ObservationDocument.\n");
-              //fprint_observation_document (stderr,best_match);
-
-              // If already recording, check to see if new scan is consistent
+              // If recording, check to see if new scan is consistent.
               // with the old one.  If not, stop the observation.
               int new_obs = 1;
               if (state==STATE_STARTED)
               {
-                if (!check_od_consistency (current_od, best_match, log, &obs_length))
+                if (!check_od_consistency (current_od, new_scan, log, &obs_length))
                 {
                   // stop current observation if they are inconsistent
                   if (!stop_observation (hdu, log, &packets_written, &state))
@@ -829,15 +836,18 @@ int main(int argc, char** argv)
                     break_loop = 1;
                     break;
                   }
+                  // Check if new scan is FINISH
+                  if (strcasecmp (new_scan->name, "FINISH") == 0)
+                    new_obs = 0;
                 }
                 else
                   new_obs = 0;
               }
 
-              current_od = best_match;
+              current_od = new_scan;
 
-              // Start new observation (unless FINISH).
-              if (new_obs && (strcasecmp (current_od->name, "FINISH") != 0) )
+              // Start new observation
+              if (new_obs)
               {
                 multilog (log, LOG_INFO,"[STATE_STOPPED->START]\n");
                 state = STATE_STARTED;
@@ -850,7 +860,7 @@ int main(int argc, char** argv)
                 }
               
                 multilog (log, LOG_INFO, "Writing psrdada header.\n");
-                write_psrdada_header (hdu, vdhdr, best_match);
+                write_psrdada_header (hdu, vdhdr, current_od);
               }
             }
 
@@ -865,26 +875,14 @@ int main(int argc, char** argv)
 
           if (((current_frame - last_frame[thread]) != 1) && (pause_seconds == 0))
           {
-            pause_seconds = last_pause + 1;
-            last_pause = pause_seconds;
-            if (last_pause > 10)
-            {
-              multilog (log, LOG_ERR, "TOO many skips.  Aborting process.\n");
-              exit_status =  EXIT_FAILURE;
-              break_loop = 1;
-              break; // break out of multi-packet loop
-            }
-            if (pause_seconds > 1)
-            {
-              multilog (log, LOG_ERR, "Detected a skip!  Aborting observation and pausing %d seconds before resuming data taking.\n",pause_seconds);
+            pause_seconds = 1;
+            multilog (log, LOG_ERR, "Detected a skip!  Aborting observation and pausing 1 second before checking again.\n");
 
-              // signal all writers to stop
-              if (!mc_stop_observation (hdu, log, &state))
-              {
-                exit_status = EXIT_FAILURE;
-                break_loop = 1;
-                break;
-              }
+            if (!stop_observation (hdu, log, &packets_written, &state))
+            {
+              exit_status = EXIT_FAILURE;
+              break_loop = 1;
+              break;
             }
           }
           

@@ -26,12 +26,15 @@ install: all
 	cp -p writer ${PACKAGE_DIR}/bin
 	${PACKAGE_DIR}/vlite-fast/scripts/install_binaries
 
-process_baseband: process_baseband.o util.o cuda_util.o utils.o multicast.o
-	$(NVCC) -o $@ $@.o utils.o util.o cuda_util.o multicast.o -lcufft -lcurand -L${MAKE_PACKAGE_DIR}/lib -lvdifio -lpsrdada
+process_baseband: process_baseband.o util.o cuda_util.o utils.o multicast.o pb_kernels.o
+	$(NVCC) -o $@ $^ -lcufft -lcurand -L${MAKE_PACKAGE_DIR}/lib -lvdifio -lpsrdada
 	chmod a+rx $@
 
-process_baseband.o: process_baseband.cu process_baseband.h def.h
-	$(NVCC) -g -O2 $(CUDA_ARCH) --compiler-options -Wall -c -o $@ -I${CUDA_DIR}/include -I${MAKE_PACKAGE_DIR}/include process_baseband.cu 
+process_baseband.o: process_baseband.cu pb_kernels.cu process_baseband.h def.h
+	$(NVCC) -g -O2 $(CUDA_ARCH) --compiler-options -Wall -c -o $@ -I${CUDA_DIR}/include -I${MAKE_PACKAGE_DIR}/include process_baseband.cu
+
+pb_kernels.o: pb_kernels.cu process_baseband.h def.h
+	$(NVCC) -g -O2 $(CUDA_ARCH) --compiler-options -Wall -c -o $@ -I${CUDA_DIR}/include -I${MAKE_PACKAGE_DIR}/include pb_kernels.cu
 
 genbase: genbase.cu util.o cuda_util.o
 	$(NVCC) -g -O2 $(CUDA_ARCH) --compiler-options -Wall -I${CUDA_DIR}/include -I${CUDA_DIR}/samples/common/inc -I${MAKE_PACKAGE_DIR}/include -c genbase.cu
