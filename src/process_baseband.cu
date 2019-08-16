@@ -32,10 +32,11 @@ static volatile int NBIT = 2;
 static FILE* logfile_fp = NULL;
 static FILE* fb_fp = NULL;
 static FILE* fb_kurto_fp = NULL;
-//static multilog_t* log = NULL;
-//static multilog_t* log = NULL;
+static multilog_t* mlog = NULL;
 static dada_hdu_t* hdu_in = NULL;
-static dada_hdu_t* hdu_out[NOUTBUFF] = {NULL};
+static dada_hdu_t* hdu_out = NULL;
+static dada_hdu_t* hdu_co = NULL;
+static int mc_control_sock = 0;
 
 
 void usage ()
@@ -58,34 +59,56 @@ void usage ()
 //	  ,(uint64_t)READER_SERVICE_PORT);
 }
 
+void cleanup (void)
+{
+  fprintf (stderr,"called cleanup! [PROCESS_BASEBAND]\n");
+  fflush (stderr);
+  if (fb_fp) fclose (fb_fp);
+  if (fb_kurto_fp) fclose (fb_kurto_fp);
+  fprintf (stderr,"h1\n");
+  fflush (stderr);
+  if (hdu_in != NULL)
+  {
+    dada_hdu_disconnect (hdu_in);
+    dada_hdu_destroy (hdu_in);
+  }
+  fprintf (stderr,"h2\n");
+  fflush (stderr);
+  if (hdu_out != NULL)
+  {
+    dada_hdu_disconnect (hdu_out);
+    dada_hdu_destroy (hdu_out);
+  }
+  fprintf (stderr,"h3\n");
+  fflush (stderr);
+  if (hdu_co)
+  {
+    dada_hdu_disconnect (hdu_co);
+    dada_hdu_destroy (hdu_co);
+  }
+  fprintf (stderr,"h4\n");
+  fflush (stderr);
+  if (mc_control_sock > 0)
+    shutdown (mc_control_sock, 2);
+  fprintf (stderr,"h5\n");
+  fflush (stderr);
+  multilog (mlog, LOG_INFO, "Completed shutdown [PROCESS_BASEBAND].\n");
+  //multilog_close (mlog);
+  fprintf (stderr,"h6\n");
+  fflush (stderr);
+  if (logfile_fp) fclose (logfile_fp);
+  fprintf (stderr,"h7\n");
+  fflush (stderr);
+}
+
 void exit_handler (void) {
   fprintf (stderr, "exit handler called\n");
   fflush (stderr);
-  return;
-  if (fb_fp) fclose (fb_fp);
-  if (fb_kurto_fp) fclose (fb_kurto_fp);
-  //multilog (log, LOG_INFO, "Completed shutdown.\n");
-  //multilog_close (log);
-  if (logfile_fp) fclose (logfile_fp);
-  dada_hdu_disconnect (hdu_in);
-  dada_hdu_destroy (hdu_in);
-  for (int i=0; i < NOUTBUFF; i++)
-  {
-    if (hdu_out[i])
-    {
-      dada_hdu_disconnect (hdu_out[i]);
-      dada_hdu_destroy (hdu_out[i]);
-    }
-  }
+  cleanup ();
 }
 
 void sigint_handler (int dummy) {
- if (logfile_fp)
- {
-    fclose (logfile_fp);
-    logfile_fp = NULL;
-  }
-  // TODO other cleanup?
+  cleanup ();
   exit (EXIT_SUCCESS);
 }
 
@@ -146,6 +169,7 @@ int write_psrdada_header (dada_hdu_t* hdu, char* inchdr, vdif_header* vdhdr, int
   char* ascii_hdr = ipcbuf_get_next_write (hdu->header_block);
   fprintf (stderr, "after next write\n");
   dadacheck (ascii_header_set (ascii_hdr, "STATIONID", "%d", station_id));
+  dadacheck (ascii_header_set (ascii_hdr, "BEAM", "%d", station_id));
   dadacheck (ascii_header_set (ascii_hdr, "RA", "%lf", ra));
   dadacheck (ascii_header_set (ascii_hdr, "DEC", "%lf", dec));
   dadacheck (ascii_header_set (ascii_hdr, "NAME", "%s", name));
@@ -274,33 +298,32 @@ void get_fbfile (char* fbfile, ssize_t fbfile_len, char* inchdr, vdif_header* vd
     snprintf (fbfile,fbfile_len,"%s/%s_ea%02d.fil",DATADIR,currt_string,station_id);
 }
 
-void check_buffer_ok (dada_hdu_t* hdu, multilog_t* log, int* buffer_ok)
+void check_buffer (dada_hdu_t* hdu, multilog_t* log)
 {
-  if (*buffer_ok == 0)
-    return;
   ipcbuf_t* buf = (ipcbuf_t*) hdu->data_block;
   uint64_t m_nbufs = ipcbuf_get_nbufs (buf);
   uint64_t m_full_bufs = ipcbuf_get_nfull (buf);
   if (m_full_bufs == (m_nbufs - 1))
   {
+    fprintf (stderr,"failed buffer check\n");
+    fflush (stderr);
     dadacheck (dada_hdu_unlock_write (hdu));
-    multilog (log, LOG_ERR,
+    multilog (mlog, LOG_ERR,
         "Only one free buffer left!  Aborting output.\n");
-    *buffer_ok = 0;
-    return;
+    exit (EXIT_FAILURE);
   }
-  *buffer_ok = 1;
 }
 
-int check_ipcio_write (dada_hdu_t* hdu, char* buf, size_t to_write, multilog_t* log)
+void check_ipcio_write (dada_hdu_t* hdu, char* buf, size_t to_write, multilog_t* log)
 {
   size_t written = ipcio_write (hdu->data_block,buf,to_write);
   if (written != to_write)
   {
-    multilog (log, LOG_ERR, "Tried to write %lu bytes to psrdada buffer but only wrote %lu.", to_write, written);
-    return 0;
+    fprintf (stderr, "failed ipcio write\n"); 
+    fflush (stderr);
+    multilog (mlog, LOG_ERR, "Tried to write %lu bytes to psrdada buffer but only wrote %lu.", to_write, written);
+    exit (EXIT_FAILURE);
   }
-  return 1;
 }
 
 int main (int argc, char *argv[])
@@ -451,24 +474,21 @@ int main (int argc, char *argv[])
 
   #if PROFILE
   // support for measuring run times of parts
-  cudaEvent_t start,stop; //,start_total,stop_total;
+  cudaEvent_t start,stop;
   cudaEventCreate (&start);
   cudaEventCreate (&stop);
-  //cudaEventCreate (&start_total);
-  //cudaEventCreate (&stop_total);
-  //cudaEventRecord (start_total,0);
   float alloc_time=0, hdr_time=0, read_time=0, todev_time=0, 
       convert_time=0, kurtosis_time=0, fft_time=0, histo_time=0,
       normalize_time=0, tscrunch_time=0, pscrunch_time=0, 
       digitize_time=0, write_time=0, flush_time=0, misc_time=0,
-      heimdall_time=0, elapsed=0;//, total_time=0;
+      elapsed=0;
   #endif
   // measure full run time time
   cudaEvent_t obs_start, obs_stop;
   cudaEventCreate (&obs_start);
   cudaEventCreate (&obs_stop);
 
-  multilog_t* log = multilog_open ("process_baseband",0);
+  multilog_t* mlog = multilog_open ("process_baseband",0);
   char logfile[128];
   time_t currt = time (NULL);
   struct tm tmpt; 
@@ -482,9 +502,9 @@ int main (int argc, char *argv[])
   snprintf (logfile,128,
       "%s/%s_%s_process_%06d.log",LOGDIR,currt_string,hostname,pid);
   logfile_fp = myopen (logfile, "w");
-  multilog_add (log, logfile_fp);
+  multilog_add (mlog, logfile_fp);
   if (stdout_output)
-    multilog_add (log, stdout);
+    multilog_add (mlog, stdout);
 
   // log configuration parameters
   char incoming_hdr[4096]; // borrow this buffer
@@ -493,59 +513,45 @@ int main (int argc, char *argv[])
     strcat (incoming_hdr, " ");
     strncat (incoming_hdr, argv[i], 4095-strlen(incoming_hdr));
   }
-  multilog (log, LOG_INFO, "[PROCESS_BASEBAND] invoked with: \n%s\n", incoming_hdr);
+  multilog (mlog, LOG_INFO, "[PROCESS_BASEBAND] invoked with: \n%s\n", incoming_hdr);
   if (key_out)
-    multilog (log, LOG_INFO, "Will write to %d psrdada buffers.\n",
-      NOUTBUFF);
+    multilog (mlog, LOG_INFO, "Will write to psrdada buffer.\n");
 
   // sanity checks on configuration parameters
   if (NKURTO != 250 && NKURTO != 500) {
-    multilog (log, LOG_ERR, "Only NKURTO==250 or 500 supported.\n");
+    multilog (mlog, LOG_ERR, "Only NKURTO==250 or 500 supported.\n");
     exit (EXIT_FAILURE);
   }
 
   // connect to input buffer
-  //dada_hdu_t* hdu_in = dada_hdu_create (log);
-  hdu_in = dada_hdu_create (log);
+  hdu_in = dada_hdu_create (mlog);
   dada_hdu_set_key (hdu_in,key_in);
   if (dada_hdu_connect (hdu_in) != 0) {
-    multilog (log, LOG_ERR, 
+    multilog (mlog, LOG_ERR, 
         "Unable to connect to incoming PSRDADA buffer!\n");
     exit (EXIT_FAILURE);
   }
 
   // connect to output buffer (optional)
-  //dada_hdu_t* hdu_out[NOUTBUFF] = {NULL};
-  dada_hdu_t* hdu_co = NULL;
-  FILE* heimdall_fp[NOUTBUFF] = {NULL};
-  FILE* rebuild_fp[NOUTBUFF] = {NULL};
-  int buffer_ok[NOUTBUFF] = {0};
-  int cobuffer_ok = 0;
-  int active_buffer = 0;
-  if (key_out) {
-    // connect to the output buffer(s)
-    for (int ibuff=0; ibuff < NOUTBUFF; ibuff++)
-    {
-      hdu_out[ibuff] = dada_hdu_create (log);
-      dada_hdu_set_key (hdu_out[ibuff],key_out+ibuff*2);
-      if (dada_hdu_connect (hdu_out[ibuff]) != 0) {
-        multilog (log, LOG_ERR, 
-            "Unable to connect to outgoing PSRDADA buffer #%d!\n",ibuff+1);
+  if (key_out)
+  {
+      hdu_out = dada_hdu_create (mlog);
+      dada_hdu_set_key (hdu_out,key_out);
+      if (dada_hdu_connect (hdu_out) != 0) {
+        multilog (mlog, LOG_ERR, 
+            "Unable to connect to outgoing PSRDADA buffer!\n");
         exit (EXIT_FAILURE);
       }
-      buffer_ok[ibuff] = 1;
-    }
   }
-  if (key_co) {
-    // connect to coadd buffer
-    hdu_co = dada_hdu_create(log);
+  if (key_co)
+  {
+    hdu_co = dada_hdu_create (mlog);
     dada_hdu_set_key(hdu_co, key_co);
     if (dada_hdu_connect (hdu_co) != 0) {
-     multilog (log, LOG_ERR, 
+     multilog (mlog, LOG_ERR, 
        "Unable to connect to Coadding PSRDADA buffer key=%x!\n",key_co);
      exit (EXIT_FAILURE);
     }
-    cobuffer_ok = 1;
   }
 
   #if PROFILE
@@ -646,7 +652,7 @@ int main (int argc, char *argv[])
   // error check that NBIT is commensurate with trimmed array size
   int trim = (fft_per_chunk*(CHANMAX-CHANMIN+1))/(polfac*NSCRUNCH);
   if (trim % (8/NBIT) != 0) {
-    multilog (log, LOG_ERR, 
+    multilog (mlog, LOG_ERR, 
         "Selected channel and bit scheme is not commensurate!.\n");
     exit (EXIT_FAILURE);
   }
@@ -731,7 +737,7 @@ int main (int argc, char *argv[])
   conn.sockoptval = 1; //release port immediately after closing connection
   if (port) {
     if (serve (port, &conn) < 0) {
-      multilog (log, LOG_ERR,
+      multilog (mlog, LOG_ERR,
           "Failed to create control socket on port %d.\n", port);
       exit (EXIT_FAILURE);
     }
@@ -741,8 +747,8 @@ int main (int argc, char *argv[])
   */
 
   // connect to multicast control socket
-  int mc_control_sock = open_mc_socket (mc_vlitegrp, MC_READER_PORT,
-      (char*)"Control Socket [Process Baseband]", NULL, log);
+  mc_control_sock = open_mc_socket (mc_vlitegrp, MC_READER_PORT,
+      (char*)"Control Socket [Process Baseband]", NULL, mlog);
   char mc_control_buff[32];
   fcntl (mc_control_sock, F_SETFL, O_NONBLOCK); // set up for polling
   int cmds[5] = {0,0,0,0,0};
@@ -755,7 +761,7 @@ int main (int argc, char *argv[])
   {
     char cmd[256];
     snprintf (cmd, 255, "/home/vlite-master/mtk/src/readbase /home/vlite-master/mtk/baseband/20150302_151845_B0329+54_ev_0005.out.uw"); 
-    multilog (log, LOG_INFO, "%s\n", cmd);
+    multilog (mlog, LOG_INFO, "%s\n", cmd);
     popen (cmd, "r");
     nanosleep (&ts_10s,NULL);
   }
@@ -781,11 +787,11 @@ int main (int argc, char *argv[])
   // this will block until a header has been created by writer, 
   // signalling the start of an observation
   // TODO -- this is encapsulated in dada_hdu_open
-  multilog (log, LOG_INFO, "Waiting for DADA header.\n");
+  multilog (mlog, LOG_INFO, "Waiting for DADA header.\n");
   fflush (logfile_fp);
   uint64_t hdr_size = 0;
   char* ascii_hdr = ipcbuf_get_next_read (hdu_in->header_block,&hdr_size);
-  multilog (log, LOG_INFO, "Received header with size %d.\n", hdr_size);
+  multilog (mlog, LOG_INFO, "Received header with size %d.\n", hdr_size);
 
   if (ascii_hdr == NULL) {
     // this could be an error condition, or it could be a result of 
@@ -793,20 +799,20 @@ int main (int argc, char *argv[])
     // CMD_QUIT has been issued in order to log the appropriate outcome
 
     if (test_for_cmd (CMD_QUIT, mc_control_sock, mc_control_buff, 32, logfile_fp))
-      multilog (log, LOG_INFO, "Received CMD_QUIT, indicating data taking is ceasing.  Exiting.\n");
+      multilog (mlog, LOG_INFO, "Received CMD_QUIT, indicating data taking is ceasing.  Exiting.\n");
     else
     {
       // did not receive CMD_QUIT, so this is an abnormal state
-      multilog (log, LOG_ERR, "PSRDADA read failed unexpectedly.  Terminating.\n");
-      exit_status = EXIT_FAILURE;
+      multilog (mlog, LOG_ERR, "PSRDADA read failed unexpectedly.  Terminating.\n");
+      exit (EXIT_FAILURE);
     }
     break;
   }
 
   cudaEventRecord(obs_start,0);
 
-  multilog (log, LOG_INFO, "psrdada header:\n%s",ascii_hdr);
-  multilog (log, LOG_INFO, "Beginning new observation.\n\n");
+  multilog (mlog, LOG_INFO, "psrdada header:\n%s",ascii_hdr);
+  multilog (mlog, LOG_INFO, "Beginning new observation.\n\n");
   fflush (logfile_fp);
   memcpy (incoming_hdr,ascii_hdr,hdr_size);
   dadacheck (ipcbuf_mark_cleared (hdu_in->header_block));
@@ -817,17 +823,15 @@ int main (int argc, char *argv[])
   ssize_t nread = ipcio_read (hdu_in->data_block,frame_buff,VD_FRM);
   if (nread != VD_FRM)
   {
-    multilog (log, LOG_ERR, "Problem reading first bloody frame!  Bailing.");
-    exit_status = EXIT_FAILURE;
-    break; 
+    multilog (mlog, LOG_ERR, "Problem reading first bloody frame!  Bailing.");
+    exit (EXIT_FAILURE);
   }
   int thread = getVDIFThreadID (vdhdr) != 0;
   int frame = getVDIFFrameNumber (vdhdr);
   if ((frame != 0) && (thread != 0))
   {
-    multilog (log, LOG_ERR, "Incoming data were not aligned!");
-    exit_status = EXIT_FAILURE;
-    break;
+    multilog (mlog, LOG_ERR, "Incoming data were not aligned!");
+    exit (EXIT_FAILURE);
   }
 
   // Open up filterbank file at appropriate time
@@ -874,35 +878,35 @@ int main (int argc, char *argv[])
 
     if (check_coords (ra, dec) )
     {
-      multilog (log, LOG_INFO,
+      multilog (mlog, LOG_INFO,
           "Source %s matches target coords, recording filterbank data.\n",
           name);
       send_email (name, hostname);
     }
     else if (check_name (name))
     {
-      multilog (log, LOG_INFO,
+      multilog (mlog, LOG_INFO,
           "Source %s matches target list, recording filterbank data.\n",
           name);
       send_email (name, hostname);
     }
     else if (check_id (datasetId))
     {
-      multilog (log, LOG_INFO,
+      multilog (mlog, LOG_INFO,
           "DATAID %s matches list, recording filterbank data.\n",
           datasetId);
       send_email (datasetId, hostname);
     }
     else {
       write_to_null = 1;
-      multilog (log, LOG_INFO,
+      multilog (mlog, LOG_INFO,
           "Source %s not on target list, disabling filterbank data.\n",
           name);
     }
   }
   if (write_to_null)
   {
-    multilog (log, LOG_INFO,
+    multilog (mlog, LOG_INFO,
         "Filterbank output disabled.  Would have written to %s.\n",fbfile);
     strncpy (fbfile,"/dev/null",255); 
     #if DOHISTO
@@ -923,35 +927,35 @@ int main (int argc, char *argv[])
   if (RFI_MODE == 0 || RFI_MODE == 2 )
   {
     fb_fp = myopen (fbfile, "wb", true, trim);
-    multilog (log, LOG_INFO,
+    multilog (mlog, LOG_INFO,
         "Writing no-RFI-excision filterbanks to %s.\n",fbfile);
   }
   else
   {
     fb_fp = myopen (fbfile_kur, "wb", trim);
-    multilog (log, LOG_INFO,
+    multilog (mlog, LOG_INFO,
         "Writing RFI-excision filterbanks to %s.\n",fbfile_kur);
   }
   if (RFI_MODE == 2)
   {
     fb_kurto_fp = myopen (fbfile_kur, "wb", trim);
-    multilog (log, LOG_INFO,
+    multilog (mlog, LOG_INFO,
         "Writing RFI-excision filterbanks to %s.\n",fbfile_kur);
   }
 
   #if DOHISTO
   FILE *histo_fp = myopen (histofile, "wb", true);
-  multilog (log, LOG_INFO, "Writing histograms to %s.\n",histofile);
+  multilog (mlog, LOG_INFO, "Writing histograms to %s.\n",histofile);
   #endif
 
   #if WRITE_KURTO
   FILE *kurto_fp = myopen (kurtofile, "wb", true);
-  multilog (log, LOG_INFO, "Writing kurtosis to %s.\n",kurtofile);
+  multilog (mlog, LOG_INFO, "Writing kurtosis to %s.\n",kurtofile);
   FILE *block_kurto_fp = myopen (block_kurtofile, "wb", true);
   multilog (
-       log, LOG_INFO, "Writing block kurtosis to %s.\n",block_kurtofile);
+       mlog, LOG_INFO, "Writing block kurtosis to %s.\n",block_kurtofile);
   FILE *weight_fp = myopen (weightfile, "wb", true);
-  multilog (log, LOG_INFO, "Writing weights to %s.\n",weightfile);
+  multilog (mlog, LOG_INFO, "Writing weights to %s.\n",weightfile);
   #endif
   fflush (logfile_fp);
 
@@ -962,46 +966,10 @@ int main (int argc, char *argv[])
   // write out psrdada header; NB this locks the hdu for writing
   if (key_out)
   {
-    // check status of buffer
-    if (buffer_ok[active_buffer] != 1)
-    {
-      if (rebuild_fp[active_buffer] != NULL)
-      {
-        multilog (log, LOG_INFO, "Preparing to pclose rebuild.\n");
-        int rebuild_stat = pclose (rebuild_fp[active_buffer]);
-        multilog (log, LOG_INFO, "rebuild pclose status: %d\n",
-            rebuild_stat);
-        if (rebuild_stat != 0)
-          exit (EXIT_FAILURE);
-        rebuild_fp[active_buffer] = NULL;
-
-        // buffer needed to be rebuilt, so we must reconnect
-        dada_hdu_destroy (hdu_out[active_buffer]);
-        hdu_out[active_buffer] = dada_hdu_create (log);
-        dada_hdu_set_key (hdu_out[active_buffer],key_out+active_buffer*2);
-        if (dada_hdu_connect (hdu_out[active_buffer]) != 0) {
-          multilog (log, LOG_ERR, 
-              "Unable to connect to outgoing PSRDADA buffer #%d!\n",
-                active_buffer+1);
-          exit (EXIT_FAILURE);
-        }
-        buffer_ok[active_buffer] = 1;
-      }
-    }
-
-    if (buffer_ok[active_buffer])
-    {
-      write_psrdada_header (hdu_out[active_buffer], incoming_hdr, vdhdr,
-        npol, heimdall_file);
-      fprintf (stderr, "write psrdada header\n");
-    }
-    else
-    {
-      multilog (log, LOG_ERR, "output buffer in bad state, disabling output.\n");
-      // TODO: signal this or exit process?
-    }
+    write_psrdada_header (hdu_out, incoming_hdr, vdhdr, npol, heimdall_file);
+    fprintf (stderr, "write psrdada header\n");
   }
-  if (key_co && cobuffer_ok) {
+  if (key_co) {
     write_psrdada_header(hdu_co, incoming_hdr, vdhdr, npol, coheimdall_file); 
     fprintf(stderr, "Write Coadd header\n");
   }
@@ -1018,7 +986,7 @@ int main (int argc, char *argv[])
   // set up sample# trackers and copy first frame into 1s-buffer
   int current_sec = getVDIFFrameSecond(vdhdr);
   int current_thread = getVDIFThreadID (vdhdr) != 0;
-  multilog (log, LOG_INFO, "Starting sec=%d, thread=%d\n",current_sec,current_thread);
+  multilog (mlog, LOG_INFO, "Starting sec=%d, thread=%d\n",current_sec,current_thread);
 
   double integrated = 0.0;
   int integrated_sec = 0;
@@ -1051,7 +1019,7 @@ int main (int argc, char *argv[])
       #endif
 
       if (nread < 0 ) {
-        multilog (log, LOG_ERR, "Error on nread=%d.\n",nread);
+        multilog (mlog, LOG_ERR, "Error on nread=%d.\n",nread);
         exit (EXIT_FAILURE);
       }
 
@@ -1060,7 +1028,7 @@ int main (int argc, char *argv[])
 
       if (nread != VD_FRM) {
         if (nread != 0)
-          multilog (log, LOG_INFO,
+          multilog (mlog, LOG_INFO,
             "Packet size=%ld, expected %ld.  Aborting this observation.\n",
             nread,VD_FRM);
         break; // potential end of observation, or error
@@ -1074,7 +1042,7 @@ int main (int argc, char *argv[])
       // this should only happen when observing over epoch changes,
       // leap seconds, or when there are major data drops.  When that
       // happens, just restart the code.
-      multilog (log, LOG_ERR, "Major data skip!  (%d vs. %d; thread = %d) Aborting this observation.\n", second,current_sec,thread);
+      multilog (mlog, LOG_ERR, "Major data skip!  (%d vs. %d; thread = %d) Aborting this observation.\n", second,current_sec,thread);
       exit_status = EXIT_FAILURE;
       quit = 1;
       break;
@@ -1083,12 +1051,12 @@ int main (int argc, char *argv[])
     // check for a QUIT command once every second
     if (test_for_cmd (CMD_QUIT, mc_control_sock, mc_control_buff, 32, logfile_fp))
     {
-      multilog (log, LOG_INFO, "Received CMD_QUIT, indicating data taking is ceasing.  Exiting.\n");
+      multilog (mlog, LOG_INFO, "Received CMD_QUIT, indicating data taking is ceasing.  Exiting.\n");
       quit = 1;
       break;
     }
     if (quit) {
-      multilog (log, LOG_INFO, "Received CMD_QUIT.  Exiting!.\n");
+      multilog (mlog, LOG_INFO, "Received CMD_QUIT.  Exiting!.\n");
       // this will break out of data loop, write out file, then break out
       // of observation loop to exit program
       break;
@@ -1100,7 +1068,7 @@ int main (int argc, char *argv[])
     // check for FRB injection conditions
     inject_frb_now = do_inject_frb && (current_sec%60==0);
     if (inject_frb_now)
-      multilog (log, LOG_INFO,
+      multilog (mlog, LOG_INFO,
         "Injecting an FRB with integrated = %.2f!!!.\n", integrated);
 
     // check that both buffers are full
@@ -1401,15 +1369,12 @@ int main (int argc, char *argv[])
       cudaEventRecord (start,0);
       #endif 
 
-      if (key_co && cobuffer_ok) {
+      if (key_co)
+      {
         char* outbuff = RFI_MODE==2? (char*)fft_trim_u_kur_hst:
                                      (char*)fft_trim_u_hst;
-        check_buffer_ok (hdu_co, log, &cobuffer_ok);
-        if (cobuffer_ok)
-        {
-          if (!check_ipcio_write (hdu_co, outbuff, maxn, log))
-            exit (EXIT_FAILURE);
-        }
+        check_buffer (hdu_co, mlog);
+        check_ipcio_write (hdu_co, outbuff, maxn, mlog);
       }
 
       // TODO -- tune this I/O.  The buffer size is set to 8192, but
@@ -1450,92 +1415,32 @@ int main (int argc, char *argv[])
     if (integrated_sec >= output_buf_sec)
     {
       output_buf_cur = output_buf_mem;
-      check_buffer_ok (
-          hdu_out[active_buffer], log, &(buffer_ok[active_buffer]));
       int to_write = output_buf_seg_size*SEG_PER_SEC;
       if (integrated_sec == output_buf_sec)
-      {
-        fprintf (stderr, "in buffer drain\n");
-        fflush (stderr);
         to_write = output_buf_size;
-        // start heimdall
-        if (buffer_ok[active_buffer])
-        {
-          fprintf (stderr, "doing heimdall logic\n");
-          fflush (stderr);
-          if (heimdall_fp[active_buffer])
-          {
-            // have used previous buffer, make sure processing is finished
-            // NB this runs the risk of a data skip if it hasn't, but will 
-            // check for that error condition later
-            #if PROFILE
-            cudaEventRecord(start,0);
-            #endif
-            multilog (log, LOG_INFO, "Preparing to pclose heimdall.\n");
-            // TODO -- this is a potential source of an infinite wait, if
-            // heimdall process hangs.  Not sure how to avoid it, though.
-            if (pclose (heimdall_fp[active_buffer]) != 0)
-            {
-              multilog (log, LOG_ERR, "heimdall exit status nonzero\n");
-              // TODO -- exit on such an error?
-              // or set active buffer to need reset
-            }
-            heimdall_fp[active_buffer] = NULL;
-            multilog (log, LOG_INFO, "Successful heimdall pclose.\n");
-            #if PROFILE
-            CUDA_PROFILE_STOP(start,stop,&elapsed)
-            heimdall_time += elapsed;
-            #endif
-          }
-          char heimdall_cmd[256];
-          // NB need to redirect stderr or else we can't catch it
-          // NB -- do NOT use yield_cpu, it halves performance
-          snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 30720 -gpu_id %d -dm 2 1000 -boxcar_max 64 -output_dir %s -group_output -zap_chans 0 190 -zap_chans 3900 4096 -beam %d -k %x -coincidencer vlite-nrl:27555 -V &> /mnt/ssd/cands/heimdall_log.asc", gpu_id, CANDDIR, station_id, key_out + active_buffer*2); 
-          //snprintf (heimdall_cmd, 255, "/home/vlite-master/mtk/bin/heimdall -nsamps_gulp 30720 -gpu_id %d -dm 2 1000 -boxcar_max 64 -output_dir %s -group_output -zap_chans 0 190 -zap_chans 3900 4096 -beam %d -k %x", gpu_id, CANDDIR, station_id, key_out + active_buffer*2); 
-          multilog (log, LOG_INFO, "%s\n", heimdall_cmd);
-          heimdall_fp[active_buffer] = popen (heimdall_cmd, "r");
-        }
-      } // end logic for reaching 10s boundary
 
-      // now write out either the full buffer or 1s
-      if (buffer_ok[active_buffer])
-      {
-        if (!check_ipcio_write(hdu_out[active_buffer],
-              (char*)output_buf_cur, to_write, log))
-          exit (EXIT_FAILURE);
+      // write out either the full buffer or 1s
+      if(key_out) {
+        check_buffer (hdu_out, mlog);
+        check_ipcio_write (hdu_out,(char*)output_buf_cur, to_write, mlog);
       }
-    } // end output buffer logic
+    }
 
   } // end loop over packets
 
   if (key_out)
   {
-    if (buffer_ok[active_buffer])
-    {
-
-      fprintf (stderr, "process_baseband: before dada_hdu_unlock_write\n");
-      dadacheck (dada_hdu_unlock_write (hdu_out[active_buffer]));
-      fprintf (stderr, "process_baseband: after dada_hdu_unlock_write\n");
-      fflush (stderr);
-    }
-    else
-    {
-      // need to rebuild buffer
-      char rebuild_cmd[128];
-      snprintf (rebuild_cmd, 127, "/home/vlite-master/mtk/vlite-fast/scripts/rebuild_dada %x", key_out + active_buffer*2); 
-      rebuild_fp[active_buffer] = popen (rebuild_cmd, "r");
-      //buffer_ok[active_buffer] = 0;
-    }
-
-    // increment active buffer
-    if (NOUTBUFF == ++active_buffer)
-      active_buffer = 0;
+    fprintf (stderr, "process_baseband: before dada_hdu_unlock_write\n");
+    dadacheck (dada_hdu_unlock_write (hdu_out));
+    fprintf (stderr, "process_baseband: after dada_hdu_unlock_write\n");
+    fflush (stderr);
   }
 
-  if (key_co && cobuffer_ok) {
-    multilog(log, LOG_INFO, "process_baseband: coadd before dada_hdu_unlock_write\n");
+  if (key_co)
+  {
+    multilog(mlog, LOG_INFO, "process_baseband: coadd before dada_hdu_unlock_write\n");
     dadacheck( dada_hdu_unlock_write(hdu_co));
-    multilog(log, LOG_INFO, "process_baseband: coadd after dada_hdu_unlock_write\n");
+    multilog(mlog, LOG_INFO, "process_baseband: coadd after dada_hdu_unlock_write\n");
   }
 
   dadacheck (dada_hdu_unlock_read (hdu_in));
@@ -1545,60 +1450,50 @@ int main (int argc, char *argv[])
   #endif 
 
   // close files
-  fclose (fb_fp); fb_fp = NULL;
-  if (fb_kurto_fp) fclose (fb_kurto_fp);
+  if (fb_fp) {fclose (fb_fp); fb_fp = NULL;}
+  if (fb_kurto_fp) {fclose (fb_kurto_fp); fb_kurto_fp = NULL;}
   #if DOHISTO
-  fclose (histo_fp);
+  if (histo_fp) {fclose (histo_fp); histo_fp = NULL;}
   #endif
   #if WRITE_KURTO
-  fclose (kurto_fp);
-  fclose (block_kurto_fp);
-  fclose (weight_fp);
+  if (kurto_fp) {fclose (kurto_fp); kurto_fp = NULL;}
+  if (block_kurto_fp) {fclose (block_kurto_fp); block_kurto_fp = NULL;}
+  if (weight_fp) {fclose (weight_fp); weight_fp = NULL;}
   #endif
   uint64_t samps_written = (fb_bytes_written*(8/NBIT))/(CHANMAX-CHANMIN+1);
-  multilog (log, LOG_INFO, "Wrote %.2f MB (%.2f s) to %s\n",
+  multilog (mlog, LOG_INFO, "Wrote %.2f MB (%.2f s) to %s\n",
       fb_bytes_written*1e-6,samps_written*tsamp,fbfile);
 
   float obs_time;
-  CUDA_PROFILE_STOP(obs_start,obs_stop,&obs_time);
-  multilog (log, LOG_INFO, "Proc Time...%.3f\n", obs_time*1e-3);
-
-  // TODO -- if it was a scan observation and not long enough to complete a full cycle,, delete the file
-  /*
-  if (fb_bytes_written == 0) {
-    remove (fname);
-  }
-  */
+  CUDA_PROFILE_STOP (obs_start,obs_stop,&obs_time);
+  multilog (mlog, LOG_INFO, "Proc Time...%.3f\n", obs_time*1e-3);
 
   #if PROFILE
   CUDA_PROFILE_STOP(start,stop,&flush_time)
-  //CUDA_PROFILE_STOP(start_total,stop_total,&total_time)
   float sub_time = hdr_time + read_time + todev_time + 
       histo_time + convert_time + kurtosis_time + fft_time + 
       normalize_time + pscrunch_time + tscrunch_time + digitize_time + 
       write_time + flush_time + misc_time;
-  multilog (log, LOG_INFO, "Alloc Time..%.3f\n", alloc_time*1e-3);
-  multilog (log, LOG_INFO, "Read Time...%.3f\n", read_time*1e-3);
-  multilog (log, LOG_INFO, "Copy To Dev.%.3f\n", todev_time*1e-3);
-  multilog (log, LOG_INFO, "Histogram...%.3f\n", histo_time*1e-3);
-  multilog (log, LOG_INFO, "Convert.....%.3f\n", convert_time*1e-3);
-  multilog (log, LOG_INFO, "Kurtosis....%.3f\n", kurtosis_time*1e-3);
-  multilog (log, LOG_INFO, "FFT.........%.3f\n", fft_time*1e-3);
-  multilog (log, LOG_INFO, "Normalize...%.3f\n", normalize_time*1e-3);
-  multilog (log, LOG_INFO, "Pscrunch....%.3f\n", pscrunch_time*1e-3);
-  multilog (log, LOG_INFO, "Tscrunch....%.3f\n", tscrunch_time*1e-3);
-  multilog (log, LOG_INFO, "Digitize....%.3f\n", digitize_time*1e-3);
-  multilog (log, LOG_INFO, "Write.......%.3f\n", write_time*1e-3);
-  multilog (log, LOG_INFO, "Flush.......%.3f\n", flush_time*1e-3);
-  multilog (log, LOG_INFO, "Heimdall....%.3f\n", heimdall_time*1e-3);
-  multilog (log, LOG_INFO, "Misc........%.3f\n", misc_time*1e-3);
-  multilog (log, LOG_INFO, "Sum of subs.%.3f\n", sub_time*1e-3);
-  //multilog (log, LOG_INFO, "Total run...%.3f\n", total_time*1e-3);
+  multilog (mlog, LOG_INFO, "Alloc Time..%.3f\n", alloc_time*1e-3);
+  multilog (mlog, LOG_INFO, "Read Time...%.3f\n", read_time*1e-3);
+  multilog (mlog, LOG_INFO, "Copy To Dev.%.3f\n", todev_time*1e-3);
+  multilog (mlog, LOG_INFO, "Histogram...%.3f\n", histo_time*1e-3);
+  multilog (mlog, LOG_INFO, "Convert.....%.3f\n", convert_time*1e-3);
+  multilog (mlog, LOG_INFO, "Kurtosis....%.3f\n", kurtosis_time*1e-3);
+  multilog (mlog, LOG_INFO, "FFT.........%.3f\n", fft_time*1e-3);
+  multilog (mlog, LOG_INFO, "Normalize...%.3f\n", normalize_time*1e-3);
+  multilog (mlog, LOG_INFO, "Pscrunch....%.3f\n", pscrunch_time*1e-3);
+  multilog (mlog, LOG_INFO, "Tscrunch....%.3f\n", tscrunch_time*1e-3);
+  multilog (mlog, LOG_INFO, "Digitize....%.3f\n", digitize_time*1e-3);
+  multilog (mlog, LOG_INFO, "Write.......%.3f\n", write_time*1e-3);
+  multilog (mlog, LOG_INFO, "Flush.......%.3f\n", flush_time*1e-3);
+  multilog (mlog, LOG_INFO, "Misc........%.3f\n", misc_time*1e-3);
+  multilog (mlog, LOG_INFO, "Sum of subs.%.3f\n", sub_time*1e-3);
 
   // reset values for next loop
   hdr_time=read_time=todev_time=convert_time=kurtosis_time=fft_time=0;
   histo_time=normalize_time=tscrunch_time=pscrunch_time=digitize_time=0;
-  write_time=flush_time=misc_time=heimdall_time=elapsed=0;
+  write_time=flush_time=misc_time=elapsed=0;
 
   #endif
 
@@ -1607,77 +1502,45 @@ int main (int argc, char *argv[])
 
   } // end loop over observations
 
-  // close multicast sockets
-  if (mc_control_sock > 0)
-    shutdown (mc_control_sock, 2);
-
-
-  // clean up psrdada data structures
-  dada_hdu_disconnect (hdu_in);
-  dada_hdu_destroy (hdu_in);
-  if (key_out) {
-    for (int i=0; i < NOUTBUFF; i++)
-    {
-      dada_hdu_disconnect (hdu_out[i]);
-      dada_hdu_destroy (hdu_out[i]);
-    }
-  }
-  if(key_co) {
-    fprintf(stderr, "Coadd DADA disconnect!\n");
-    dada_hdu_disconnect(hdu_co);
-    dada_hdu_destroy(hdu_co);
-  }
-
   // free memory
-  cudaFreeHost (udat_hst);
-  cudaFree (udat_dev);
-  cudaFree (fft_in);
-  cudaFree (fft_out);
-  cudaFree (fft_ave);
-  cudaFree (fft_trim_u_dev);
-  cudaFreeHost (fft_trim_u_hst);
+  if (udat_hst) cudaFreeHost (udat_hst);
+  if (udat_dev) cudaFree (udat_dev);
+  if (fft_in) cudaFree (fft_in);
+  if (fft_out) cudaFree (fft_out);
+  if (fft_ave) cudaFree (fft_ave);
+  if (fft_trim_u_dev) cudaFree (fft_trim_u_dev);
+  if (fft_trim_u_hst) cudaFreeHost (fft_trim_u_hst);
+  if (output_buf_mem ) cudaFreeHost (output_buf_mem );
   if (RFI_MODE == 2)
   {
-    cudaFree (fft_out_kur);
-    cudaFree (fft_ave_kur);
-    cudaFree (fft_trim_u_kur_dev);
-    cudaFreeHost (fft_trim_u_kur_hst);
+    if (fft_out_kur) cudaFree (fft_out_kur);
+    if (fft_ave_kur) cudaFree (fft_ave_kur);
+    if (fft_trim_u_kur_dev) cudaFree (fft_trim_u_kur_dev);
+    if (fft_trim_u_kur_hst) cudaFreeHost (fft_trim_u_kur_hst);
   }
   if (RFI_MODE)
   {
-    cudaFree (kur_dev);
-    cudaFree (kur_fb_dev);
-    cudaFree (kur_weights_dev);
+    if (kur_dev) cudaFree (kur_dev);
+    if (kur_fb_dev) cudaFree (kur_fb_dev);
+    if (kur_weights_dev) cudaFree (kur_weights_dev);
   }
   #if DOHISTO
-  cudaFree (histo_dev);
-  cudaFreeHost (histo_hst);
+  if (histo_dev) cudaFree (histo_dev);
+  if (histo_hst) cudaFreeHost (histo_hst);
   #endif
   #if WRITE_KURTO
-  cudaFreeHost (kur_hst);
-  cudaFreeHost (kur_fb_hst);
-  cudaFreeHost (kur_weights_hst);
+  if (kur_hst) cudaFreeHost (kur_hst);
+  if (kur_fb_hst) cudaFreeHost (kur_fb_hst);
+  if (kur_weights_hst) cudaFreeHost (kur_weights_hst);
   #endif
 
-  #if PROFILE
-  cudaEventDestroy (start);
-  cudaEventDestroy (stop);
-  //cudaEventDestroy (start_total);
-  //cudaEventDestroy (stop_total);
-  #endif
-  cudaEventDestroy (obs_start);
-  cudaEventDestroy (obs_stop);
-
-  // finish any heimdall processing
-  for (int ibuff=0; ibuff < NOUTBUFF; ibuff++)
-  {
-    if (heimdall_fp[ibuff])
-      pclose (heimdall_fp[ibuff]);
-  }
-
-  multilog (log, LOG_INFO, "Completed shutdown.\n");
-  multilog_close (log);
-  fclose (logfile_fp);
+  // these are on the stack, don't think we want this
+  //#if PROFILE
+  //cudaEventDestroy (start);
+  //cudaEventDestroy (stop);
+  //#endif
+  //cudaEventDestroy (obs_start);
+  //cudaEventDestroy (obs_stop);
 
   return exit_status;
     

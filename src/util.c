@@ -9,7 +9,8 @@ void dadacheck (int rcode)
   if (rcode < 0)
   {
     fprintf (stderr, "dadacheck failed\n");
-    throw 20;
+    fflush (stderr);
+    exit (EXIT_FAILURE);
   }
 }
 

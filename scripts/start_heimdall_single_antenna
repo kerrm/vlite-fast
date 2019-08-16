@@ -1,0 +1,23 @@
+#!/bin/bash
+PACKAGE_DIR=/home/vlite-master/mtk
+CUDA_DIR=/usr/cuda-9.2.88
+export LD_LIBRARY_PATH=${PACKAGE_DIR}/lib:${CUDA_DIR}/lib64:${LD_LIBRARY_PATH}
+#set -x
+# arguments should be
+# $1 = filterbank dada key 
+# $2 = gpu_id
+
+# start heimdall if we have specified a dada key
+if [ ${1} -gt 0 ]
+then
+
+# with 30720 samples per gulp (23.6s), that is 31457280 bytes
+# there are three internal buffers per heimdall gulp.
+${PACKAGE_DIR}/vlite-fast/scripts/start_dada ${1} 10485760 12
+
+# how to propagate antenna -- will have to grab from header, instead
+/home/vlite-master/surya/bin/heimdall_stream -nsamps_gulp 30720 -gpu_id ${2} -dm 2 1000 -boxcar_max 64 -output_dir /mnt/ssd/cands -group_output -zap_chans 0 190 -zap_chans 3900 4096 -k ${1} -coincidencer vlite-nrl:27555 -V &> /mnt/ssd/cands/heimdall_log.asc
+
+/mnt/ssd/bin/dada_db -k ${1} -d
+
+fi

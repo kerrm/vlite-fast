@@ -6,7 +6,9 @@
 # $2 = writer port
 # $3 = info port
 # $4 = baseband dada key
-PACKAGE_DIR=/home/vlite-master/surya
+#PACKAGE_DIR=/home/vlite-master/surya
+PACKAGE_DIR=/home/vlite-master/mtk
+#PACKAGE_DIR=${VLITE_PACKAGE_DIR}
 ${PACKAGE_DIR}/vlite-fast/scripts/start_dada ${4} 257638400 60
 ##${PACKAGE_DIR}/bin/writer -e ${1} -p ${2} -i ${3} -k ${4} -o
 #${PACKAGE_DIR}/bin/writer -e ${1} -k ${4} -o

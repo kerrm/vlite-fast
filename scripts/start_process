@@ -11,17 +11,13 @@ set -x
 # $5 = write_fb
 # $6 = nbit
 # $7 = gpu_id
-if [ ${3} -gt 0 ]
-then
-#/home/vlite-master/mtk/scripts/start_dada ${3} 2012800 8
-#/home/vlite-master/mtk/scripts/start_dada $(( ${3} + 2 )) 2012800 8
-${PACKAGE_DIR}/vlite-fast/scripts/start_dada ${3} 10485760 8
-${PACKAGE_DIR}/vlite-fast/scripts/start_dada $(( ${3} + 2 )) 10485760 8
-fi
 
 if [ ${4} -gt 0 ]
 then
-${PACKAGE_DIR}/vlite-fast/scripts/start_dada ${4} 10485760 8 
+  ${PACKAGE_DIR}/vlite-fast/scripts/start_dada ${4} 10485760 8 
+  # if Coadder key is non zero run start_coadder
+ # ${PACKAGE_DIR}/vlite-fast/scripts/start_coadd 60 10485760 ${5} 
+ echo "Should have called start_coadd"
 fi
 
 # start nvidia-smi logging if not already
@@ -35,13 +31,6 @@ fi
 #fi
 #echo "NVIDIA_SMI_PID=${NVIDIA_SMI_PID}"
 
-# if Coadder key is non zero run start_coadder
-if [ ${4} -gt 0 ]
-then
- # ${PACKAGE_DIR}/vlite-fast/scripts/start_coadd 60 10485760 ${5} 
- echo "Should have called start_coadd"
-fi
-
 # "i" is inject FRB
 #${PACKAGE_DIR}/bin/process_baseband -k ${2} -K ${3} -w ${4} -b ${5} -g ${6} -o -i 
 # this will only write kurtosis
@@ -53,22 +42,9 @@ fi
 # this will write coadd
 ${PACKAGE_DIR}/bin/process_baseband -k ${2} -K ${3} -w ${5} -b ${6} -g ${7} -o -C ${4}
 
-if [ ${3} -gt 0 ]
-then
-  if [ pgrep -x heimdall > /dev/null ]
-  then
-    wait $(pgrep -x heimdall)
-  fi
-sleep 1
-#sudo ${PACKAGE_DIR}/bin/dada_db -k ${3} -d
-#sudo ${PACKAGE_DIR}/bin/dada_db -k $(( ${3} + 2 )) -d
-/mnt/ssd/bin/dada_db -k ${3} -d
-/mnt/ssd/bin/dada_db -k $(( ${3} + 2 )) -d
-fi
-
 if [ ${4} -gt 0 ]
 then
-/mnt/ssd/bin/dada_db -k ${4} -d
+  /mnt/ssd/bin/dada_db -k ${4} -d
 fi
 
 #if [ $NVIDIA_SMI_PID -gt 0 ]
