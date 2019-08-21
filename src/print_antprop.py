@@ -22,7 +22,7 @@ sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
 sock.bind(server_address)
 
 
-def stringify_obsdoc(data):
+def stringify_antdoc(data):
     e = ElementTree.fromstring(data)
     elems = e.getchildren()
     tags = [x.tag for x in elems]
@@ -63,12 +63,11 @@ def stringify_obsdoc(data):
 while True:
     print >>sys.stderr, '\nwaiting to receive message'
     data, address = sock.recvfrom(8192)
-    print data
-    continue
             
     #print >>sys.stderr, 'received %s bytes from %s' % (len(data), address)
-    #dom = xml.dom.minidom.parseString(data)
-    #print dom.toprettyxml()
+    dom = xml.dom.minidom.parseString(data)
+    print dom.toprettyxml()
+    continue
     try:
         print stringify_obsdoc(data)
     except Exception as e:
