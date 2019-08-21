@@ -427,7 +427,7 @@ int main(int argc, char** argv)
   char frame_buff[FRAME_BUFSIZE];
   char* vdif_buff = frame_buff + UDP_HDR_SIZE;
   vdif_header* vdhdr = (vdif_header*) (vdif_buff);
-  char fill_vdif_buff[VDIF_FRAME_SIZE] = {0};
+  char fill_vdif_buff[VDIF_FRAME_SIZE] = {127};
   vdif_header* fill_vdhdr = (vdif_header*) fill_vdif_buff;
   char dev[16] = ETHDEV;
   char hostname[MAXHOSTNAME];
