@@ -369,6 +369,46 @@ int check_od_consistency (ObservationDocument* od1,
   return 0;
 }
 
+/*
+ * Return the difference, in frames, between two packets represented by
+ * the provided VDIF headers.  It is assumed hdr2 will follow in time.
+ * This will include the total number of frames, that is, for both threads/
+ * polarizations in the data stream.  It will be 1 for contiguous data.
+ */
+int vdif_frame_difference (vdif_header* hdr1, vdif_header* hdr2)
+{
+  // recall our convention for thread, thread = threadid != 0
+  // viz. threadid == 0 = 0, anything else mapped to 0
+  return (hdr2->seconds-hdr1->seconds)*FRAMESPERSEC +
+         (hdr2->frame-hdr1->frame)*2 + 
+         ((hdr2->threadid!=0)-(hdr1->threadid!=0));
+}
+
+/*
+ * Change the fields of the supplied VDIF header to emulate the arrival of the
+ * subequent frame/packet.
+ */
+void increment_vdif_header (vdif_header* hdr)
+{
+  int old_thread = hdr->threadid != 0; // our internal thread id
+  if (old_thread == 1)
+  { 
+    // if we are on thread 1, we increment frame and switch to thread 0
+    hdr->frame += 1;
+    hdr->threadid = 0;
+    
+    // check if we wrapped to the next second
+    if (FRAMESPERSEC==hdr->frame)
+    {
+      hdr->seconds += 1;
+      hdr->frame = 0;
+    }
+  }
+  else
+    // otherwise, simply switch from thread 0 to thread 1
+    hdr->threadid = 1;
+}
+
 int main(int argc, char** argv)
 {
   // register SIGINT handling
@@ -387,6 +427,8 @@ int main(int argc, char** argv)
   char frame_buff[FRAME_BUFSIZE];
   char* vdif_buff = frame_buff + UDP_HDR_SIZE;
   vdif_header* vdhdr = (vdif_header*) (vdif_buff);
+  char fill_vdif_buff[VDIF_FRAME_SIZE] = {0};
+  vdif_header* fill_vdhdr = (vdif_header*) fill_vdif_buff;
   char dev[16] = ETHDEV;
   char hostname[MAXHOSTNAME];
   gethostname(hostname,MAXHOSTNAME);
@@ -397,10 +439,8 @@ int main(int argc, char** argv)
   int last_frame[2] = {-2,-2};
   int time_since_timet = 10;
   time_t packet_monitor_timet = 0;
-  int pause_seconds = 1;
   int obs_length = 0;
   double vdif_dmjd = -1;
-  int abnormal_stop = 0;
   
   int state = STATE_STOPPED;
   //uint64_t port = WRITER_SERVICE_PORT;
@@ -778,30 +818,59 @@ int main(int argc, char** argv)
           }
           else
           {
-            multilog (mlog, LOG_ERR, "Received anomalous packet size: %d, aborting obs.\n", raw_bytes_read);
-            stop_observation (hdu, mlog, &packets_written, &state);
-            abnormal_stop = 1;
+            //multilog (mlog, LOG_ERR, "Received anomalous packet size: %d, aborting obs.\n", raw_bytes_read);
+            multilog (mlog, LOG_ERR,
+                "Received anomalous packet size: %d.  Continuing.\n", raw_bytes_read);
+            //stop_observation (hdu, mlog, &packets_written, &state);
+            //abnormal_stop = 1;
             continue;
           }
         }
-        else
+
+        int read_thread = getVDIFThreadID (vdhdr) != 0;
+        int read_frame = getVDIFFrameNumber (vdhdr);
+        vdif_header* vdhdr_to_use;
+        char* vdbuff_to_use;
+        int frame_diff;
+
+        // handle special case of first frame
+        if (last_frame[read_thread] == -2)
+          frame_diff = 1;
+        else 
+          frame_diff = vdif_frame_difference (fill_vdhdr, vdhdr);
+
+        if (frame_diff > 1)
+          multilog (mlog, LOG_ERR, "Found %d skipped frames.\nCurrent  frame=%d, thread=%d.\nPrevious frame=%d, thread=%d.\n",frame_diff-1,read_frame,read_thread,fill_vdhdr->frame,fill_vdhdr->threadid!=0);
+        
+        for (int iframe = frame_diff; iframe > 0; --iframe)
         {
-          int thread = getVDIFThreadID (vdhdr) != 0; // TODO -- check this convention
-          int current_frame = getVDIFFrameNumber (vdhdr);
+          if (iframe>1)
+          {
+            // increment the last recorded header and use it for all processing
+            increment_vdif_header (fill_vdhdr);
+            vdhdr_to_use = fill_vdhdr;
+            vdbuff_to_use = fill_vdif_buff;
+          }
+          else
+          {
+            vdhdr_to_use = vdhdr;
+            vdbuff_to_use = vdif_buff;
+          }
+
+          int thread = getVDIFThreadID (vdhdr_to_use) != 0;
+          int current_frame = getVDIFFrameNumber (vdhdr_to_use);
+
 
           // check if we are on a one-second boundary with thread==0
-          if ((thread==0) && (MAXFRAMENUM == last_frame[thread]))
+          if ((thread==0) && (MAXFRAMENUM == last_frame[0]))
           {
-            vdif_dmjd = getVDIFFrameDMJD (vdhdr, FRAMESPERSEC);
+            vdif_dmjd = getVDIFFrameDMJD (vdhdr_to_use, FRAMESPERSEC);
             
             // reset sample counter
             last_frame[0] = -1;
             last_frame[1] = -1;
 
-            // unpause skip checking
-            pause_seconds = 0;
-
-            // monitor synchronization between system time and packets
+            // check synchronization between system time and packets every 10s
             if (time_since_timet==10)
               packet_monitor_timet = time (NULL);
             time_since_timet -= 1;
@@ -828,7 +897,7 @@ int main(int argc, char** argv)
               exit (EXIT_FAILURE);
             }
 
-            if (state == STATE_STARTED || abnormal_stop)
+            if (state == STATE_STARTED)
               obs_length += 1;
 
             // See if there is a new scan, defined such that the VDIF second
@@ -844,7 +913,7 @@ int main(int argc, char** argv)
               // If recording, check to see if new scan is consistent.
               // with the old one.  If not, stop the observation.
               int new_obs = 1;
-              if (state==STATE_STARTED || abnormal_stop)
+              if (state==STATE_STARTED)
               {
                 if (!check_od_consistency (current_od, new_scan, mlog, obs_length))
                 {
@@ -867,7 +936,6 @@ int main(int argc, char** argv)
                 state = STATE_STARTED;
                 packets_written = 0;
                 obs_length = 0;
-                abnormal_stop = 0;
 
                 if (dada_hdu_lock_write (hdu) < 0) {
                   multilog (mlog, LOG_ERR, 
@@ -876,28 +944,16 @@ int main(int argc, char** argv)
                 }
               
                 multilog (mlog, LOG_INFO, "Writing psrdada header.\n");
-                write_psrdada_header (hdu, vdhdr, current_od);
+                write_psrdada_header (hdu, vdhdr_to_use, current_od);
               }
             }
 
           }
-
-          // CHECK FOR SKIPS IN DATA
-          //
-          // initially buffer is full, so we will drop packets at startup.
-          // Any time we drop packets, we want to have a pause to attempt
-          // to catch up, and we can handle both problems by allowing the
-          // startup to trigger a pause.
-
-          if (((current_frame - last_frame[thread]) != 1) && (pause_seconds == 0))
-          {
-            pause_seconds = 1;
-            multilog (mlog, LOG_ERR, "Detected a skip!  Aborting observation and pausing 1 second before checking again.\n");
-
-            stop_observation (hdu, mlog, &packets_written, &state);
-            abnormal_stop = 1;
-          }
           
+          if (iframe==1)
+            // copy over VDIF header for next loop
+            *fill_vdhdr = *vdhdr;
+
           // update sample counter
           last_frame[thread] = current_frame;
 
@@ -905,7 +961,7 @@ int main(int argc, char** argv)
             continue;
 
           ipcio_bytes_written = ipcio_write (
-              hdu->data_block,vdif_buff, VDIF_FRAME_SIZE);
+              hdu->data_block, vdbuff_to_use, VDIF_FRAME_SIZE);
 
           if (ipcio_bytes_written != VDIF_FRAME_SIZE) {
             multilog (mlog, LOG_ERR,
@@ -914,7 +970,8 @@ int main(int argc, char** argv)
           }
           else
             packets_written++;
-        } // end check on raw socket read success
+
+        } // end loop over received (and possibly) skipped) frame(s)
       } // end multiple packet read
     } // end raw socket read logic
 
