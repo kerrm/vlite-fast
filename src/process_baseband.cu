@@ -28,6 +28,9 @@ extern "C" {
 #include "multicast.h"
 }
 
+// rt profiling
+#define RT_PROFILE 1
+
 static volatile int NBIT = 2;
 static FILE* logfile_fp = NULL;
 static FILE* fb_fp = NULL;
@@ -471,6 +474,15 @@ int main (int argc, char *argv[])
 
   struct timespec ts_1ms = get_ms_ts (1);
   struct timespec ts_10s = get_ms_ts (10000);
+
+  #if RT_PROFILE
+  cudaEvent_t rt_start, rt_stop; //,start_total,stop_total;
+  cudaEventCreate (&rt_start);
+  cudaEventCreate (&rt_stop);
+
+  float measured_time=0;
+  float read_time=0, proc_time=0, write_time=0, rt_elapsed=0;
+  #endif
 
   #if PROFILE
   // support for measuring run times of parts
@@ -992,6 +1004,12 @@ int main (int argc, char *argv[])
   int integrated_sec = 0;
   output_buf_cur = output_buf_mem;
 
+  #if RT_PROFILE
+  cudaEventRecord(rt_start,0);
+  #endif 
+  measured_time = 0;
+
+
   while(true) // loop over data packets
   {
     int thread = getVDIFThreadID (vdhdr) != 0;
@@ -1006,6 +1024,10 @@ int main (int argc, char *argv[])
       cudaEventRecord (start,0);
       #endif 
 
+      //#if RT_PROFILE
+      //cudaEventRecord(rt_start,0);
+      //#endif 
+
       // copy previous frame to contiguous 1-s buffer
       size_t idx = VLITE_RATE*thread + sample*VD_DAT;
       memcpy (udat_hst + idx,dat,VD_DAT);
@@ -1017,6 +1039,11 @@ int main (int argc, char *argv[])
       CUDA_PROFILE_STOP(start,stop,&elapsed)
       read_time += elapsed;
       #endif
+
+      //#if RT_PROFILE
+      //CUDA_PROFILE_STOP(rt_start,rt_stop,&rt_elapsed)
+      //read_time += rt_elapsed;
+      //#endif
 
       if (nread < 0 ) {
         multilog (mlog, LOG_ERR, "Error on nread=%d.\n",nread);
@@ -1082,6 +1109,8 @@ int main (int argc, char *argv[])
       #if PROFILE
       cudaEventRecord(start,0);
       #endif 
+
+
       // need to copy pols separately
       for (int ipol=0; ipol < 2; ++ipol)
       {
@@ -1110,6 +1139,10 @@ int main (int argc, char *argv[])
       #endif
       #endif
 
+      ////// RT_PROFILE
+      //#if RT_PROFILE
+      //cudaEventRecord (rt_start,0);
+      //#endif
       ////// CONVERT UINTS to FLOATS //////
       #if PROFILE
       cudaEventRecord (start,0);
@@ -1362,12 +1395,21 @@ int main (int argc, char *argv[])
       misc_time += elapsed;
       #endif
 
+      //#if RT_PROFILE
+      //CUDA_PROFILE_STOP(rt_start,rt_stop,&rt_elapsed)
+      //proc_time += rt_elapsed;
+      //#endif
+
       // finally, push the filterbanked time samples onto psrdada buffer
       // and/or write out to sigproc
 
       #if PROFILE
       cudaEventRecord (start,0);
       #endif 
+
+      //#if RT_PROFILE
+      //cudaEventRecord (rt_start,0);
+      //#endif
 
       if (key_co)
       {
@@ -1376,6 +1418,11 @@ int main (int argc, char *argv[])
         check_buffer (hdu_co, mlog);
         check_ipcio_write (hdu_co, outbuff, maxn, mlog);
       }
+
+      //#if RT_PROFILE
+      //CUDA_PROFILE_STOP(rt_start,rt_stop,&rt_elapsed)
+      //write_time += rt_elapsed;
+      //#endif
 
       // TODO -- tune this I/O.  The buffer size is set to 8192, but
       // according to fstat the nfs wants a block size of 1048576! Each
@@ -1409,9 +1456,27 @@ int main (int argc, char *argv[])
     } // end loop over data segments
 
     integrated_sec += 1;
-    if (integrated_sec%30==0) // TMP
+    #if RT_PROFILE
+    if (integrated_sec%10==0) {
+    #else
+    if (integrated_sec%30==0) {
+    #endif
+      // TMP
+      #if RT_PROFILE
+      CUDA_PROFILE_STOP(rt_start,rt_stop,&rt_elapsed)
+      measured_time += rt_elapsed;
+      //fprintf (stderr, "data  sec=%d\n",10);
+      //fprintf (stderr, "read  sec=%.2f\n",read_time*1e-3);
+      //fprintf (stderr, "proc  sec=%.2f\n",proc_time*1e-3);
+      //fprintf (stderr, "write sec=%.2f\n",write_time*1e-3);
+      if ((measured_time*1e-3-integrated) > 0.5)
+        multilog (mlog, LOG_ERR, "Measured time exceeding integrated time: measured: %.2f, integrated: %.2f\n",measured_time*1e-3,integrated);
+      cudaEventRecord (rt_start,0);
+      read_time=0;proc_time=0;write_time=0;
+      #else
       fprintf (stderr, "integrated sec=%d\n",integrated_sec);
-
+      #endif 
+    }
     if (integrated_sec >= output_buf_sec)
     {
       output_buf_cur = output_buf_mem;
