@@ -20,7 +20,7 @@
 #define ETHDEV "eth0"
 
 #define MAXFRAMENUM 25599
-#define FRAMESPERSEC 26000
+#define FRAMESPERSEC 25600
 
 #define EVENTDIR "/mnt/ssd/dumps"
 #define LOGDIR "/home/vlite-master/mtk/logs"
