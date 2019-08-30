@@ -116,7 +116,9 @@ int check_name (char* src)
 int check_id (char* src)
 {
   return (strstr (src, "18B-405") != NULL ||
-          strstr (src, "19A-331") != NULL);
+          strstr (src, "19A-331") != NULL ||
+          strstr (src, "SC1046")  != NULL
+         );
 }
 
 double coord_dist (double ra1, double ra2, double de1, double de2)
