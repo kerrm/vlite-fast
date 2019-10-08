@@ -14,7 +14,10 @@ set -x
 
 if [ ${4} -gt 0 ]
 then
-  ${PACKAGE_DIR}/vlite-fast/scripts/start_dada ${4} 10485760 8 
+  ${PACKAGE_DIR}/vlite-fast/scripts/start_dada ${4} 10485760 4 
+  #${PACKAGE_DIR}/vlite-fast/scripts/start_dada ${4} 5242880 32
+  #${PACKAGE_DIR}/vlite-fast/scripts/start_dada ${4} 1310720 128 
+  #${PACKAGE_DIR}/vlite-fast/scripts/start_dada ${4}  2621440 32
   # if Coadder key is non zero run start_coadder
  # ${PACKAGE_DIR}/vlite-fast/scripts/start_coadd 60 10485760 ${5} 
  echo "Should have called start_coadd"
