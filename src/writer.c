@@ -379,9 +379,9 @@ int vdif_frame_difference (vdif_header* hdr1, vdif_header* hdr2)
 {
   // recall our convention for thread, thread = threadid != 0
   // viz. threadid == 0 = 0, anything else mapped to 0
-  return (hdr2->seconds-hdr1->seconds)*FRAMESPERSEC +
-         (hdr2->frame-hdr1->frame)*2 + 
-         ((hdr2->threadid!=0)-(hdr1->threadid!=0));
+  return ((int)hdr2->seconds-hdr1->seconds)*(2*FRAMESPERSEC) +
+         ((int)hdr2->frame-hdr1->frame)*2 + 
+         ((int)(hdr2->threadid!=0)-(hdr1->threadid!=0));
 }
 
 /*
@@ -814,7 +814,10 @@ int main(int argc, char** argv)
           {
             multilog (mlog, LOG_ERR,
                 "Raw socket read failed: %d\n.", raw_bytes_read);
-            exit (EXIT_FAILURE);
+            //exit (EXIT_FAILURE);
+            // change 9/5/2019 -- break out of multi-packet loop instead of failing
+            break;
+
           }
           else
           {
@@ -838,6 +841,14 @@ int main(int argc, char** argv)
           frame_diff = 1;
         else 
           frame_diff = vdif_frame_difference (fill_vdhdr, vdhdr);
+
+        // TMP -- sanity check
+        if (frame_diff < 1)
+        {
+          fprintf (stderr, "frame difference is %d, should not be possible!\n",frame_diff);
+          fprintf (stderr, "hdr1: sec, frame, threadid=%d %d %d\n",fill_vdhdr->seconds,fill_vdhdr->frame,fill_vdhdr->threadid);
+          fprintf (stderr, "hdr2: sec, frame, threadid=%d %d %d\n",vdhdr->seconds,vdhdr->frame,vdhdr->threadid);
+        }
 
         if (frame_diff > 1)
           multilog (mlog, LOG_ERR, "Found %d skipped frames.\nCurrent  frame=%d, thread=%d.\nPrevious frame=%d, thread=%d.\n",frame_diff-1,read_frame,read_thread,fill_vdhdr->frame,fill_vdhdr->threadid!=0);
@@ -959,6 +970,10 @@ int main(int argc, char** argv)
 
           if (state != STATE_STARTED)
             continue;
+
+          // TMP sanity check
+          //if (vdbuff_to_use == fill_vdif_buff)
+          //  fprintf (stderr, "Writing out of fill buffer.\n");
 
           ipcio_bytes_written = ipcio_write (
               hdu->data_block, vdbuff_to_use, VDIF_FRAME_SIZE);

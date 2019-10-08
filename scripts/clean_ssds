@@ -1,0 +1,13 @@
+#!/bin/bash
+ssh mkerr@vlite-difx1 "rm /mnt/ssd/fildata/* < /dev/null &> /dev/null; rm /mnt/ssd/dumps/*  < /dev/null &> /dev/null" < /dev/null &> /dev/null
+ssh mkerr@vlite-difx2 "rm /mnt/ssd/fildata/* < /dev/null &> /dev/null; rm /mnt/ssd/dumps/*  < /dev/null &> /dev/null" < /dev/null &> /dev/null
+ssh mkerr@vlite-difx3 "rm /mnt/ssd/fildata/* < /dev/null &> /dev/null; rm /mnt/ssd/dumps/*  < /dev/null &> /dev/null" < /dev/null &> /dev/null
+ssh mkerr@vlite-difx4 "rm /mnt/ssd/fildata/* < /dev/null &> /dev/null; rm /mnt/ssd/dumps/*  < /dev/null &> /dev/null" < /dev/null &> /dev/null
+ssh mkerr@vlite-difx5 "rm /mnt/ssd/fildata/* < /dev/null &> /dev/null; rm /mnt/ssd/dumps/*  < /dev/null &> /dev/null" < /dev/null &> /dev/null
+ssh mkerr@vlite-difx6 "rm /mnt/ssd/fildata/* < /dev/null &> /dev/null; rm /mnt/ssd/dumps/*  < /dev/null &> /dev/null" < /dev/null &> /dev/null
+ssh mkerr@vlite-difx7 "rm /mnt/ssd/fildata/* < /dev/null &> /dev/null; rm /mnt/ssd/dumps/*  < /dev/null &> /dev/null" < /dev/null &> /dev/null
+ssh mkerr@vlite-difx8 "rm /mnt/ssd/fildata/* < /dev/null &> /dev/null; rm /mnt/ssd/dumps/*  < /dev/null &> /dev/null" < /dev/null &> /dev/null
+ssh mkerr@vlite-difx9 "rm /mnt/ssd/fildata/* < /dev/null &> /dev/null; rm /mnt/ssd/dumps/*  < /dev/null &> /dev/null" < /dev/null &> /dev/null
+ssh mkerr@vlite-difx10 "rm /mnt/ssd/fildata/* < /dev/null &> /dev/null; rm /mnt/ssd/dumps/*  < /dev/null &> /dev/null" < /dev/null &> /dev/null
+ssh mkerr@vlite-difx11 "rm /mnt/ssd/fildata/* < /dev/null &> /dev/null; rm /mnt/ssd/dumps/*  < /dev/null &> /dev/null" < /dev/null &> /dev/null
+ssh mkerr@vlite-difx12 "rm /mnt/ssd/fildata/* < /dev/null &> /dev/null; rm /mnt/ssd/dumps/*  < /dev/null &> /dev/null" < /dev/null &> /dev/null

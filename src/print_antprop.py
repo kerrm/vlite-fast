@@ -28,6 +28,7 @@ def stringify_antdoc(data):
     elems = e.getchildren()
     tags = [x.tag for x in elems]
     print tags
+    return
     # get time in clock format UT for easy of reading
     eop = e.attrib['startTime']
     # convert to hhmmss
@@ -71,7 +72,6 @@ while True:
     #print >>sys.stderr, 'received %s bytes from %s' % (len(data), address)
     dom = xml.dom.minidom.parseString(data)
     print dom.toprettyxml()
-    continue
     try:
         print stringify_obsdoc(data)
     except Exception as e:
@@ -333,4 +333,4 @@ while True:
 <offset>4.1E-12</offset>
 </AntennaProperties>
 </AntennaPropertyTable>
-
+"""

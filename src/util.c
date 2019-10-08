@@ -98,6 +98,7 @@ int check_name (char* src)
           strstr (src, "J2321+6024") != NULL || 
           strstr (src, "B0833-45") != NULL ||
           strstr (src, "J0835-45") != NULL ||
+          strstr (src, "B1237+25") != NULL ||
           //strstr (src, "B0950+08") != NULL || 
           //strstr (src, "B1133+16") != NULL ||
           //strstr (src, "B1237+25") != NULL ||
