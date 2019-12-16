@@ -40,6 +40,10 @@ typedef struct {
   
   double t0;          // start of trigger window [seconds since Unix epoch]
   double t1;          // end of trigger window [seconds since Unix epoch]
+ // float  sn;          // s/n of trigger
+ // float  dm;          // dm  of trigger
+ // float  width;       // width of trigger
+  float  peak_time;   // peaktime of trigger
   char meta[128];     // ancillary information like source name, ...
 
 } trigger_t;

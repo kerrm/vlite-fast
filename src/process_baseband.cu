@@ -184,6 +184,8 @@ int write_psrdada_header (dada_hdu_t* hdu, char* inchdr, vdif_header* vdhdr, int
   dadacheck (ascii_header_set (ascii_hdr, "NBIT", "%d", NBIT) );
   dadacheck (ascii_header_set (ascii_hdr, "TSAMP", "%lf", tsamp) );
   dadacheck (ascii_header_set (ascii_hdr, "UTC_START", "%s", dada_utc) );
+  double epc = epoch_seconds;
+  dadacheck (ascii_header_set (ascii_hdr, "UNIXEPOCH", "%lf", epc) );
   // also record the VDIF MJD info, this is useful for finding
   // transients in the baseband stream.
   dadacheck (ascii_header_set (ascii_hdr, "VDIF_MJD", "%d", 

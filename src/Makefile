@@ -8,10 +8,10 @@ PARSE_HEADERS = defaults.h  eop.h  executor.h  options.h  vlaant.h  vlite_xml.h 
 #F77 = gfortran -std=legacy -ffixed-line-length-none 
 CC = gcc
 #NVCC = nvcc
-NVCC = /usr/cuda-9.2.88/bin/nvcc 
 CUDA_ARCH = -gencode arch=compute_35,code=sm_35 -gencode arch=compute_52,code=sm_52 -gencode arch=compute_61,code=sm_61
 #CUDA_DIR = /usr/cuda
-CUDA_DIR = /usr/cuda-9.2.88
+CUDA_DIR = /usr/cuda-10.1.243.418.87.00
+NVCC = $(CUDA_DIR)/bin/nvcc
 MAKE_PACKAGE_DIR = /home/vlite-master/mtk
 #PACKAGE_DIR = /home/vlite-master/surya
 PACKAGE_DIR = /home/vlite-master/mtk
@@ -27,7 +27,7 @@ install: all
 	${PACKAGE_DIR}/vlite-fast/scripts/install_binaries
 
 process_baseband: process_baseband.o util.o cuda_util.o utils.o multicast.o pb_kernels.o
-	$(NVCC) -o $@ $^ -lcufft -lcurand -L${MAKE_PACKAGE_DIR}/lib -lvdifio -lpsrdada
+	$(NVCC) -o $@ $^ -L${CUDA_DIR}/lib64  -lcufft -lcurand -L${MAKE_PACKAGE_DIR}/lib -lvdifio -lpsrdada
 	chmod a+rx $@
 
 process_baseband.o: process_baseband.cu pb_kernels.cu process_baseband.h def.h

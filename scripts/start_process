@@ -14,7 +14,11 @@ set -x
 
 if [ ${4} -gt 0 ]
 then
-  ${PACKAGE_DIR}/vlite-fast/scripts/start_dada ${4} 10485760 4 
+  let buffsz=655360*8*${6}
+  # 65536 is one second per bit
+  # 8 is the bufflen we want (s)
+  ${PACKAGE_DIR}/vlite-fast/scripts/start_dada2 ${4} ${buffsz} 8 
+  /home/vlite-master/surya/asgard/bin/agtriggerhook  -k ${4} -N 8 -b ${6} -s ${buffsz} &
   #${PACKAGE_DIR}/vlite-fast/scripts/start_dada ${4} 5242880 32
   #${PACKAGE_DIR}/vlite-fast/scripts/start_dada ${4} 1310720 128 
   #${PACKAGE_DIR}/vlite-fast/scripts/start_dada ${4}  2621440 32

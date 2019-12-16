@@ -14,7 +14,7 @@
 #set -x
 #PACKAGE_DIR=${VLITE_PACKAGE_DIR}
 PACKAGE_DIR=/home/vlite-master/mtk
-CUDA_DIR=/usr/cuda-9.2.88
+CUDA_DIR=/usr/cuda
 export LD_LIBRARY_PATH=${PACKAGE_DIR}/lib:${CUDA_DIR}/lib64:${LD_LIBRARY_PATH}
 #sleep 0.5
 

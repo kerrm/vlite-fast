@@ -1,0 +1,23 @@
+#!/bin/bash
+# this version results in fewer segfaults since it will only try to
+# destroy a buffer if it exists; could imagine a more sophisticated
+# version using ipcs, but leave that for later
+#set -x
+# run as root
+# arguments should be
+# $1 = dada key
+# $2 = size in bytes
+# $3 = number of buffers
+PACKAGE_DIR=/home/vlite-master/mtk
+#${PACKAGE_DIR}/bin/dada_db -k ${1} -l -b ${2} -n ${3}
+/mnt/ssd/bin/dada_db -k ${1} -l -b ${2} -n ${3} -r 2
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+# two reads
+# check return value of output for success
+if [ $? -ne 0 ]
+then
+#${PACKAGE_DIR}/bin/dada_db -k ${1} -d
+#${PACKAGE_DIR}/bin/dada_db -k ${1} -l -b ${2} -n ${3}
+/mnt/ssd/bin/dada_db -k ${1} -d
+/mnt/ssd/bin/dada_db -k ${1} -l -b ${2} -n ${3}
+fi
