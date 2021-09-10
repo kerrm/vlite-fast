@@ -32,6 +32,8 @@
 #include "multicast.h"
 
 #define MAX_DUMP_REQUESTS 32
+#define DUMP_BUFSZ 64
+//#define DUMP_BUFSZ 2*VDIF_FRAME_SIZE * FRAMESPERSEC;
 
 typedef struct {
   char* buf_in;          // address to buffer to copy
@@ -116,8 +118,10 @@ char* get_local_buf () {
         break;
       }
     }
-    if (success == 1)
+    if (success == 1) {
+      printf ("Using local slot %d.\n",ireq1);
       return mem_slots[ireq1];
+    }
   }
   return NULL;
 }
@@ -125,7 +129,7 @@ char* get_local_buf () {
 void make_buffs() {
   // Make local memory for dumps
   for (int ireq=0; ireq < MAX_DUMP_REQUESTS; ++ireq) {
-    mem_slots[ireq] = malloc (VDIF_FRAME_SIZE*FRAMESPERSEC);
+    mem_slots[ireq] = calloc (DUMP_BUFSZ, 1);
     if (mem_slots[ireq] == NULL) {
       // Failure.  Quit, and clean up memory
       multilog (mlog, LOG_ERR, "[DUMPER] Error allocating memory.\n");
@@ -135,11 +139,16 @@ void make_buffs() {
 }
 
 void copy_voltages (dump_req_t* req) {
+  if (req->bufsz != DUMP_BUFSZ) {
+    multilog (mlog, LOG_ERR, "[DUMPER] Mismatched buffer size.\n");
+    cleanup (-1, 1);
+  }
   memcpy (req->buf_local, req->buf_in, req->bufsz);
 }
 
 void dump_voltages (dump_req_t* req)
 {
+  printf ("Dumping from slot %d.\n",(req->buf_local-mem_slots[0])/req->bufsz);
   // dump to disk
   // TODO -- check out O_DIRECT option
   int fd = open (req->fname, O_WRONLY | O_CREAT, 0664);
@@ -229,6 +238,11 @@ int main(int argc, char** argv) {
   // Set up local memory for voltage copies.
   make_buffs ();
 
+  // TMP
+  for (int ireq = 0; ireq < MAX_DUMP_REQUESTS; ++ireq) {
+    sprintf (mem_slots[ireq], "%d test test test %d\n", ireq, ireq);
+  }
+
   fd_set readfds;
   struct timeval select_timeout; //timeout for select(), 10ms
   select_timeout.tv_sec = 0;
@@ -239,29 +253,24 @@ int main(int argc, char** argv) {
   dump_req_t dump;
   dump.buf_in = mem_slots[0];
   dump.buf_local = NULL;
-  dump.bufsz = VDIF_FRAME_SIZE * FRAMESPERSEC;
+  dump.bufsz = DUMP_BUFSZ;
   char tmp[64];
   // end TMP
   while (1) {
 
     // Send a dump request
     if (test_send < 8) {
-      sprintf (tmp, "test_dump_%02d", test_send);
-      strcpy (dump.fname, tmp);
-      if (MulticastSend (mc_vlitegrp, MC_DUMPER_PORT, (const char *)(&dump), sizeof(dump_req_t)) < 0)
-      {
-        multilog (mlog, LOG_ERR, "send: %s\n", strerror (errno));
-        cleanup (-1, 0);
+      for (int idummy=0; idummy<2; ++idummy) {
+        sprintf (tmp, "test_dump_%02d", test_send);
+        dump.buf_in = mem_slots[16+test_send];
+        strcpy (dump.fname, tmp);
+        if (MulticastSend (mc_vlitegrp, MC_DUMPER_PORT, (const char *)(&dump), sizeof(dump_req_t)) < 0)
+        {
+          multilog (mlog, LOG_ERR, "send: %s\n", strerror (errno));
+          cleanup (-1, 0);
+        }
+        test_send++;
       }
-      test_send++;
-      sprintf (tmp, "test_dump_%02d", test_send);
-      strcpy (dump.fname, tmp);
-      if (MulticastSend (mc_vlitegrp, MC_DUMPER_PORT, (const char *)(&dump), sizeof(dump_req_t)) < 0)
-      {
-        multilog (mlog, LOG_ERR, "send: %s\n", strerror (errno));
-        cleanup (-1, 0);
-      }
-      test_send++;
       sleep (0.1);
     }
     else {
