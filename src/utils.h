@@ -37,12 +37,21 @@ typedef struct {
 } threadio_t;
 
 typedef struct {
+  char* buf_in;          // address to buffer to copy
+  char* buf_local;          // address to buffer to copy
+  size_t bufsz;     // size of buffer in bytes
+  char fname[256];    // name of output file
+  char hostname[MAXHOSTNAME];
+} dump_req_t;
+
+
+typedef struct {
   
   double t0;          // start of trigger window [seconds since Unix epoch]
   double t1;          // end of trigger window [seconds since Unix epoch]
- // float  sn;          // s/n of trigger
- // float  dm;          // dm  of trigger
- // float  width;       // width of trigger
+  float  sn;          // s/n of trigger
+  float  dm;          // dm  of trigger
+  float  width;       // width of trigger
   float  peak_time;   // peaktime of trigger
   char meta[128];     // ancillary information like source name, ...
 

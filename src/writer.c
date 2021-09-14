@@ -431,7 +431,7 @@ int main(int argc, char** argv)
   vdif_header* fill_vdhdr = (vdif_header*) fill_vdif_buff;
   char dev[16] = ETHDEV;
   char hostname[MAXHOSTNAME];
-  gethostname(hostname,MAXHOSTNAME);
+  gethostname (hostname,MAXHOSTNAME);
   //char *starthost = strstr(hostname, "difx");
 
   // keep track of received frames for checking for packet loss, and also
@@ -527,9 +527,7 @@ int main(int argc, char** argv)
   // have a 1-1 mapping between threadios and recent dump times.  Given
   // size of the buffer, about 100 seems appropriate.
   // Since the buffers are 1s, use UTC time stamps.
-  threadio_t* threadios[MAX_THREADIOS] = {NULL};
   time_t dump_times[MAX_THREADIOS] = {0};
-  int dump_idx = 0; // index of next dump / threadio
   // this really needs to be the size of the number of buffers!
   // but 100 here should be plenty
   char* bufs_to_write[100] = {NULL};
@@ -744,55 +742,18 @@ int main(int argc, char** argv)
           dump_times, bufs_to_write, times_to_write);
       multilog (mlog, LOG_INFO,
           "Dumping out %d buffers with the following UTC timestamps:\n",nbufs_to_write);
-      for (int ibuf=0; ibuf < nbufs_to_write; ++ibuf)
-      {
-        threadio_t* tio = threadios[dump_idx];
-        if (tio != NULL)
-        {
-          // check status of previous I/O and clean up memory
-          if (tio->status != 0)
-          {
-            if (tio->status < 0)
-              multilog (mlog, LOG_ERR,
-                  "Previous I/O still ongoing, likely an error condition.");
-            else
-              multilog (mlog, LOG_ERR,
-                  "Previous I/O encountered error.");
-          }
-          free (tio);
-        }
-
-        tio = (threadio_t*)(malloc (sizeof (threadio_t)));
-        if (tio==NULL)
-        {
-          multilog (mlog, LOG_ERR, "Unable to allocate ThreadIO mem.");
-          exit( EXIT_FAILURE);
-        }
-        tio->status = -1;
-        tio->buf = bufs_to_write[ibuf];
-        tio->bufsz = bufsz;
-        tio->ms_delay = ibuf > 1?ibuf*500:0;
+      dump_req_t dump = {.buf_local=NULL,.bufsz=bufsz};
+      strcpy (dump.hostname, hostname);
+      for (int ibuf=0; ibuf < nbufs_to_write; ++ibuf) {
+        dump.buf_in = bufs_to_write[ibuf];
         int sid = getVDIFStationID ((vdif_header*)bufs_to_write[ibuf]);
-        snprintf (tio->fname, 255,"%s/%s_ea%02d_%li.vdif",
+        snprintf (dump.fname, 255,"%s/%s_ea%02d_%li.vdif",
             EVENTDIR,currt_string,sid,times_to_write[ibuf]);
         multilog (mlog, LOG_INFO, ".... UTC %li writing to %s\n",
-            times_to_write[ibuf], tio->fname);
-        // TODO -- could actually do a better job of this since we KNOW how far
-        // a given buffer is from dropping off the end of the ring buffer, and
-        // rather than launching the threads all at once, we can either launch them
-        // staggered over time (on the 1-s boundaries) or at least in between 20-packet
-        // reads so that we don't overflow the raw socket buffer
-        // TODO also -- we can make the dump threads less problematic if we use
-        // zero copy by memory mapping the output file to the system memory and
-        // faulting it
-        if (pthread_create (&tio->tid, NULL, &buffer_dump, (void*)tio) != 0)
-            multilog (mlog, LOG_ERR, "pthread_create failed\n");
-        if (pthread_detach (tio->tid) != 0)
-            multilog (mlog, LOG_ERR, "pthread_detach failed\n");
-        threadios[dump_idx] = tio;
-        dump_times[dump_idx++] = times_to_write[ibuf];
-        if (MAX_THREADIOS == dump_idx)
-          dump_idx = 0;
+            times_to_write[ibuf], dump.fname);
+        if (MulticastSend (mc_vlitegrp, MC_DUMPER_PORT, (const char *)(&dump), sizeof(dump_req_t)) < 0) {
+          exit (EXIT_FAILURE);
+        }
       }
       // remove triggers from queue
       for (int i=0; i < MAX_TRIGGERS; ++i)
@@ -997,10 +958,6 @@ int main(int argc, char** argv)
     }
   } // end main loop over state/packets
   
-  for (int iio=0; iio < MAX_THREADIOS; ++iio)
-    if (threadios[iio] != NULL)
-      free (threadios[iio]);
-
   return exit_status;
 } // end main
 

@@ -32,15 +32,8 @@
 #include "multicast.h"
 
 #define MAX_DUMP_REQUESTS 32
-#define DUMP_BUFSZ 64
-//#define DUMP_BUFSZ 2*VDIF_FRAME_SIZE * FRAMESPERSEC;
-
-typedef struct {
-  char* buf_in;          // address to buffer to copy
-  char* buf_local;          // address to buffer to copy
-  size_t bufsz;     // size of buffer in bytes
-  char fname[256];    // name of output file
-} dump_req_t;
+//#define DUMP_BUFSZ 64
+#define DUMP_BUFSZ (2*VDIF_FRAME_SIZE*FRAMESPERSEC)
 
 static multilog_t* mlog = NULL;
 static FILE* logfile_fp = NULL;
@@ -48,32 +41,11 @@ static int mc_control_sock = 0;
 static int mc_dumper_sock = 0;
 char* mem_slots[MAX_DUMP_REQUESTS] = {NULL};
 static dump_req_t reqs[MAX_DUMP_REQUESTS];
+void cleanup (int status, int quit);
 
 void send_quit () {
   const char cmdstop[] = {CMD_STOP};
   MulticastSend (mc_vlitegrp, MC_WRITER_PORT, cmdstop, 1);
-}
-
-void cleanup (int status, int quit) {
-  if (quit!=0)
-    send_quit();
-  if (mc_control_sock > 0)
-    shutdown (mc_control_sock, 2);
-  if (mc_dumper_sock > 0)
-    shutdown (mc_dumper_sock, 2);
-  for (int ireq=0; ireq < MAX_DUMP_REQUESTS; ++ireq)
-    free (mem_slots[ireq]);
-  multilog (mlog, LOG_INFO, "Completed cleanup [DUMPER].\n");
-  multilog_close (mlog);
-  if (logfile_fp) {
-    fflush (logfile_fp);
-    fclose (logfile_fp);
-  }
-  exit (status);
-}
-
-void sigint_handler (int dummy) {
-  cleanup (0, 0);
 }
 
 void clear_req (dump_req_t* req) {
@@ -118,10 +90,8 @@ char* get_local_buf () {
         break;
       }
     }
-    if (success == 1) {
-      printf ("Using local slot %d.\n",ireq1);
+    if (success == 1)
       return mem_slots[ireq1];
-    }
   }
   return NULL;
 }
@@ -138,6 +108,14 @@ void make_buffs() {
   }
 }
 
+int addr_to_slot (char* addr) {
+  for (int ireq=0; ireq < MAX_DUMP_REQUESTS; ++ireq) {
+    if (addr==mem_slots[ireq])
+      return ireq;
+  }
+  return -1;
+}
+
 void copy_voltages (dump_req_t* req) {
   if (req->bufsz != DUMP_BUFSZ) {
     multilog (mlog, LOG_ERR, "[DUMPER] Mismatched buffer size.\n");
@@ -148,7 +126,9 @@ void copy_voltages (dump_req_t* req) {
 
 void dump_voltages (dump_req_t* req)
 {
-  printf ("Dumping from slot %d.\n",(req->buf_local-mem_slots[0])/req->bufsz);
+  if (req->buf_local==NULL)
+    return;
+  printf ("Dumping from slot %d.\n",(addr_to_slot(req->buf_local)));
   // dump to disk
   // TODO -- check out O_DIRECT option
   int fd = open (req->fname, O_WRONLY | O_CREAT, 0664);
@@ -183,10 +163,9 @@ void dump_voltages (dump_req_t* req)
   req->buf_local = NULL;
 }
 
-void open_log () {
+void open_log (char* hostname) {
   // logging
-  char hostname[MAXHOSTNAME];
-  gethostname(hostname,MAXHOSTNAME);
+  gethostname (hostname,MAXHOSTNAME);
   mlog = multilog_open ("dumper",0);
   time_t currt = time (NULL);
   struct tm tmpt;
@@ -198,12 +177,38 @@ void open_log () {
   pid_t pid = getpid ();
   snprintf (logfile,128,
       "%s/%s_%s_dumper_%06d.log",LOGDIR,currt_string,hostname,pid);
-  //logfile_fp = fopen (logfile, "w");
-  //multilog_add (mlog, logfile_fp);
+  logfile_fp = fopen (logfile, "w");
+  multilog_add (mlog, logfile_fp);
   //if (stderr_output)
-  multilog_add (mlog, stderr);
+  //multilog_add (mlog, stderr);
   //printf("writing log to %s\n",logfile);
 }
+
+void cleanup (int status, int quit) {
+  if (quit!=0)
+    send_quit();
+  if (mc_control_sock > 0)
+    shutdown (mc_control_sock, 2);
+  if (mc_dumper_sock > 0)
+    shutdown (mc_dumper_sock, 2);
+  // Dump any remaining requests
+  for (int ireq=0; ireq < MAX_DUMP_REQUESTS; ++ireq)
+    dump_voltages (&reqs[ireq]);
+  for (int ireq=0; ireq < MAX_DUMP_REQUESTS; ++ireq)
+    free (mem_slots[ireq]);
+  multilog (mlog, LOG_INFO, "Completed cleanup [DUMPER].\n");
+  multilog_close (mlog);
+  if (logfile_fp) {
+    fflush (logfile_fp);
+    fclose (logfile_fp);
+  }
+  exit (status);
+}
+
+void sigint_handler (int dummy) {
+  cleanup (0, 0);
+}
+
 
 
 int main(int argc, char** argv) {
@@ -215,8 +220,8 @@ int main(int argc, char** argv) {
   //atexit (exit_handler);
 
   // TODO -- make this a utility function with "dumper" as arg etc.?
-  open_log ();
-
+  char hostname[MAXHOSTNAME];
+  open_log (hostname);
   
   // Multi-cast sockets: control and dump requests.
   // For simplicity, just subscribe to the "writer" group.  Why not just
@@ -238,31 +243,33 @@ int main(int argc, char** argv) {
   // Set up local memory for voltage copies.
   make_buffs ();
 
+  /*
   // TMP
   for (int ireq = 0; ireq < MAX_DUMP_REQUESTS; ++ireq) {
     sprintf (mem_slots[ireq], "%d test test test %d\n", ireq, ireq);
   }
+  */
 
   fd_set readfds;
   struct timeval select_timeout; //timeout for select(), 10ms
   select_timeout.tv_sec = 0;
   select_timeout.tv_usec = 10000;
 
+  /*
   // TMP
   int test_send = 0;
-  dump_req_t dump;
-  dump.buf_in = mem_slots[0];
-  dump.buf_local = NULL;
-  dump.bufsz = DUMP_BUFSZ;
+  dump_req_t dump = {.buf_in=mem_slots[0],.buf_local=NULL,.bufsz=DUMP_BUFSZ };
   char tmp[64];
   // end TMP
+  */
   while (1) {
 
+    /*
     // Send a dump request
-    if (test_send < 8) {
-      for (int idummy=0; idummy<2; ++idummy) {
+    if (test_send < 64) {
+      for (int idummy=0; idummy<4; ++idummy) {
         sprintf (tmp, "test_dump_%02d", test_send);
-        dump.buf_in = mem_slots[16+test_send];
+        dump.buf_in = mem_slots[16+test_send%16];
         strcpy (dump.fname, tmp);
         if (MulticastSend (mc_vlitegrp, MC_DUMPER_PORT, (const char *)(&dump), sizeof(dump_req_t)) < 0)
         {
@@ -271,11 +278,12 @@ int main(int argc, char** argv) {
         }
         test_send++;
       }
-      sleep (0.1);
+      sleep (0.01);
     }
     else {
       cleanup (0, 0);
     }
+    */
 
     FD_ZERO (&readfds);
     FD_SET (mc_control_sock, &readfds);
@@ -303,12 +311,16 @@ int main(int argc, char** argv) {
         multilog (mlog, LOG_INFO, "Dump request queue full!  Aborting.\n");
         cleanup (1,1);
       }
-      printf ("first_empty=%d\n",first_empty);
-      printf ("slots=%d\n",slots);
+      //printf ("first_empty=%d\n",first_empty);
+      //printf ("slots=%d\n",slots);
 
       // Read as many dump requests as will fit in the buffer.
       int new_dumps = 0;
-      for (int ireq=0; ireq < slots; ++ireq) {
+      for (int ireq=0; ireq < 10*MAX_DUMP_REQUESTS; ++ireq) {
+        if (first_empty==MAX_DUMP_REQUESTS) {
+          multilog (mlog, LOG_INFO, "Out of slots! Aborting.\n");
+          cleanup (-1,1);
+        }
         int nbytes = MultiCastReceive (mc_dumper_sock, 
             (char*)(&reqs[first_empty]), sizeof(dump_req_t), mc_from);
         if (nbytes == 0)
@@ -322,6 +334,8 @@ int main(int argc, char** argv) {
           multilog (mlog, LOG_INFO, "Received a corruped dump request.  Aborting.\n");
           cleanup (2,1);
         }
+        if (strcmp (hostname, reqs[first_empty].hostname) != 0)
+          continue;
         new_dumps++;
         first_empty++;
       } // end dump socket loop
@@ -330,6 +344,7 @@ int main(int argc, char** argv) {
 
     // Copy any new dump requests to local memory.  These are sorted such
     // that the earliest dumps are the oldest.
+    int pending_writes = 0;
     for (int ireq=0; ireq < MAX_DUMP_REQUESTS; ++ireq) {
 
       // No request waiting
@@ -337,8 +352,10 @@ int main(int argc, char** argv) {
         continue; // in principle could break because they are sorted
 
       // Already copied.
-      if ((reqs[ireq].buf_in != NULL) && (reqs[ireq].buf_local != NULL))
+      if ((reqs[ireq].buf_in != NULL) && (reqs[ireq].buf_local != NULL)) {
+        pending_writes++;
         continue;
+      }
       
       // Need to copy.
       reqs[ireq].buf_local = get_local_buf();
@@ -350,10 +367,14 @@ int main(int argc, char** argv) {
       copy_voltages (reqs+ireq);
     }
 
+    if (pending_writes == 0)
+      continue;
+
+    multilog (mlog, LOG_INFO, "Pending %d writes.\n", pending_writes);
+
     // Finally, write one (and only one) request to disk on each loop.
     for (int ireq=0; ireq < MAX_DUMP_REQUESTS; ++ireq) {
       if (reqs[ireq].buf_local != NULL) {
-        printf ("Dumping a buffer.\n");
         dump_voltages (reqs+ireq);
         break;
       }

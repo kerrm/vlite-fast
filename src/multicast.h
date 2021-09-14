@@ -17,6 +17,7 @@ static const char mc_vlitegrp[] = "224.3.29.71";
 #define MC_WRITER_PORT 20001
 #define MC_INFO_PORT 20002
 #define MC_TRIGGER_PORT 20003
+#define MC_DUMPER_PORT 20004
 
 //Multicast ports for executor packets
 #define MULTI_OBSINFO_PORT 53001

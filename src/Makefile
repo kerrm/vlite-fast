@@ -24,6 +24,7 @@ install: all
 	cp -p readbase ${PACKAGE_DIR}/bin
 	cp -p messenger ${PACKAGE_DIR}/bin
 	cp -p writer ${PACKAGE_DIR}/bin
+	cp -p dumper ${PACKAGE_DIR}/bin
 	${PACKAGE_DIR}/vlite-fast/scripts/install_binaries
 
 process_baseband: process_baseband.o util.o cuda_util.o utils.o multicast.o pb_kernels.o
@@ -51,9 +52,14 @@ messenger:	messenger.c def.h utils.o $(PARSE_FILES)
 	gcc -o $@ messenger.o utils.o $(PARSE_OBJ) -L${MAKE_PACKAGE_DIR}/lib -lexpat -lpsrdada
 	chmod a+rx $@
 
-writer:	writer.c def.h utils.o $(PARSE_FILES)
+writer:	writer.c def.h utils.o
 	gcc -g -O2 -Wall -std=gnu99 -pthread -c writer.c $(PARSE_FILES) -I${MAKE_PACKAGE_DIR}/include -I$(INCDIFXMESSAGE)
 	gcc -o $@ writer.o utils.o $(PARSE_OBJ) -pthread -L${MAKE_PACKAGE_DIR}/lib -lpsrdada -lvdifio -lexpat -Wl,-rpath /home/vlite-master/mtk/lib
+	chmod a+rx $@
+
+dumper:	dumper.c def.h utils.o $(PARSE_FILES)
+	gcc -g -O2 -Wall -std=gnu99 -pthread -c dumper.c $(PARSE_FILES) -I${MAKE_PACKAGE_DIR}/include -I$(INCDIFXMESSAGE)
+	gcc -o $@ dumper.o utils.o $(PARSE_OBJ) -pthread -L${MAKE_PACKAGE_DIR}/lib -lpsrdada -lvdifio -lexpat -Wl,-rpath /home/vlite-master/mtk/lib
 	chmod a+rx $@
 
 util.o: util.h util.c
@@ -66,6 +72,6 @@ utils.o: utils.h utils.c Connection.h
 	gcc -g -O2 -Wall -std=gnu99 -c -o $@ utils.c -I${MAKE_PACKAGE_DIR}/include
 
 clean:
-	rm -f *.o core* process_baseband genbase readbase messenger writer
+	rm -f *.o core* process_baseband genbase readbase messenger writer dumper
 
 
