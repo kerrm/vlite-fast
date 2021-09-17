@@ -16,7 +16,7 @@ MAKE_PACKAGE_DIR = /home/vlite-master/mtk
 #PACKAGE_DIR = /home/vlite-master/surya
 PACKAGE_DIR = /home/vlite-master/mtk
 
-all: process_baseband genbase readbase messenger writer
+all: process_baseband genbase readbase messenger writer dumper
 
 install: all
 	cp -p process_baseband ${PACKAGE_DIR}/bin
