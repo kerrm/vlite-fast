@@ -40,8 +40,7 @@ typedef struct {
   char* buf_in;          // address to buffer to copy
   char* buf_local;          // address to buffer to copy
   size_t bufsz;     // size of buffer in bytes
-  char fname[256];    // name of output file
-  char hostname[MAXHOSTNAME];
+  time_t utc_epoch;
 } dump_req_t;
 
 
