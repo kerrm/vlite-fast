@@ -67,15 +67,16 @@ while True:
     print >>sys.stderr, '\nwaiting to receive message'
     data, address = sock.recvfrom(8192)
     sec = int(time.time())
-    file('/users/mkerr/mtk/logs/antprop/antrop_%d.xml'%(sec),'w').write(data)
+    file('/users/mkerr/mtk/logs/antprop/antprop_%d.xml'%(sec),'w').write(data)
+    file('/users/mkerr/mtk/logs/antprop/antprop_latest.xml','w').write(data)
             
     #print >>sys.stderr, 'received %s bytes from %s' % (len(data), address)
-    dom = xml.dom.minidom.parseString(data)
+    #dom = xml.dom.minidom.parseString(data)
     print dom.toprettyxml()
-    try:
-        print stringify_obsdoc(data)
-    except Exception as e:
-        print e
+    #try:
+    #    print stringify_obsdoc(data)
+    #except Exception as e:
+    #    print e
 
 """
 <AntennaPropertyTable configuration="A" creation="58725.65837644676" datasetId="19A-107.sb36897542.eb37158321.58725.65837579861">                                                                 

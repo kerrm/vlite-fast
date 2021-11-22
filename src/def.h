@@ -31,6 +31,6 @@
 
 
 #define MAX_THREADIOS 100
-#define MAX_TRIGGERS 10
+#define MAX_TRIGGERS 20
 
 #endif

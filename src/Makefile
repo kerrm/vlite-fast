@@ -57,6 +57,11 @@ writer:	writer.c def.h utils.o
 	gcc -o $@ writer.o utils.o $(PARSE_OBJ) -pthread -L${MAKE_PACKAGE_DIR}/lib -lpsrdada -lvdifio -lexpat -Wl,-rpath /home/vlite-master/mtk/lib
 	chmod a+rx $@
 
+test_psrdada:	test_psrdada.c
+	gcc -g -O2 -Wall -std=gnu99 -c test_psrdada.c $(PARSE_FILES) -I${MAKE_PACKAGE_DIR}/include -I$(INCDIFXMESSAGE)
+	gcc -o $@ test_psrdada.o utils.o $(PARSE_OBJ) -L${MAKE_PACKAGE_DIR}/lib -lpsrdada -lvdifio -lexpat -Wl,-rpath /home/vlite-master/mtk/lib
+	chmod a+rx $@
+
 dumper:	dumper.c def.h utils.o $(PARSE_FILES)
 	gcc -g -O2 -Wall -std=gnu99 -pthread -c dumper.c $(PARSE_FILES) -I${MAKE_PACKAGE_DIR}/include -I$(INCDIFXMESSAGE)
 	gcc -o $@ dumper.o utils.o $(PARSE_OBJ) -pthread -L${MAKE_PACKAGE_DIR}/lib -lpsrdada -lvdifio -lexpat -Wl,-rpath /home/vlite-master/mtk/lib
