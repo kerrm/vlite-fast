@@ -1,11 +1,12 @@
-#include <stdlib.h>
+#include <assert.h>
+#include <errno.h>
+#include <math.h>
+#include <pthread.h>
 #include <signal.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#include <errno.h>
-#include <pthread.h>
-#include <math.h>
 
 #include "dada_def.h"
 #include "dada_hdu.h"
@@ -24,11 +25,16 @@
 
 static FILE* logfile_fp = NULL;
 static struct timespec ts_1ms;
-static const char cmdstop[] = {CMD_STOP};
 static int mc_control_sock = 0;
 static int mc_info_sock = 0;
 static multilog_t* mlog = NULL;
 static dada_hdu_t* hdu = NULL;
+static int anom_count = 0;
+static const int max_anom_count1 = 100;
+static const int max_anom_count2 = 500;
+static int skipped_frames = 0;
+static const int max_skipped_frames1 = 1000;
+static const int max_skipped_frames2 = 50000;
 
 void usage ()
 {
@@ -247,80 +253,6 @@ int mc_stop_observation (dada_hdu_t* hdu, multilog_t* log, int* state)
 }
 */
 
-/*
- * Return all buffers that have not yet been written out and that overlap
- * any of the trigger window.  By fiat, all buffers are now aligned to a
- * UTC second.
- */
-int get_buffer_trigger_overlap (char** bufs, int nbufs,
-    trigger_t** tqueue, time_t* dump_times,
-    char** bufs_to_write, time_t* times_to_write)
-{
-  int nbuf_to_write = 0;
-  double min_time = 1e100;
-  double max_time = -1e100;
-  for (int ibuf=0; ibuf < nbufs; ++ibuf)
-  {
-    // get time for frame at start of buffer
-    // TODO -- we can actually cache the seconds when we do the 1-s
-    // boundary, since we create alignment by design.  Leave for now.
-    vdif_header* vdhdr = (vdif_header*) bufs[ibuf];
-    time_t utc_seconds;
-    double buf_t0 = vdif_to_dunixepoch (vdhdr, &utc_seconds); // beginning of buffer
-    if (buf_t0 < min_time) min_time = buf_t0;
-    if (buf_t0 > max_time) max_time = buf_t0;
-
-    /* TMP -- leave for debugging purposes
-    char dada_utc[32];
-    struct tm utc_time;
-    gmtime_r (&utc_seconds, &utc_time);
-    strftime (dada_utc, 64, DADA_TIMESTR, &utc_time);
-    if (ibuf==0)
-      fprintVDIFHeader(stderr, vdhdr, VDIFHeaderPrintLevelColumns);
-    multilog (mlog, LOG_INFO, "buffer UTC %s\n", dada_utc);
-    printf ("utc_seconds = %ld\n",utc_seconds);
-    fprintVDIFHeader (stderr, vdhdr, VDIFHeaderPrintLevelShort);
-    */
-
-    int trigger_overlap = 0;
-    for (int itrig=0; itrig < MAX_TRIGGERS; ++itrig)
-    {
-      if (tqueue[itrig] == NULL)
-        break;
-      // condition for overlap is 
-      // !((trigger_start > buffer_end) || (trigger_end < buffer_start)
-      // --> (trigger_start < buffer_end && trigger_end > buffer_start)
-      if ((tqueue[itrig]->t0 <= (buf_t0+1)) &&
-          (tqueue[itrig]->t1 >= buf_t0))
-      {
-        trigger_overlap = 1;
-        break;
-      }
-    } // end loop over trigger times
-
-    // continue to next buffer if no trigger overlaps
-    if (!trigger_overlap) continue;
-
-    // check to make sure we haven't already dumped it
-    int already_dumped = 0;
-    for (int idump=0; idump < MAX_THREADIOS; ++idump)
-    {
-      if (utc_seconds == dump_times[idump])
-      {
-        already_dumped = 1;
-        break;
-      }
-    } // end loop over dump times
-
-    if (already_dumped) continue;
-
-    times_to_write[nbuf_to_write] = utc_seconds;
-    bufs_to_write[nbuf_to_write++] = bufs[ibuf];
-  } // end loop over buffers
-  fprintf (stderr,"earliest buffer t0 = %.3f\n",min_time);
-  fprintf (stderr,"latest   buffer t0 = %.3f\n",max_time);
-  return nbuf_to_write;
-}
 
 /*
  * Return an ObservationDocument from the cache if its startTime matches
@@ -524,15 +456,6 @@ int main(int argc, char** argv)
   }
   multilog (mlog, LOG_INFO, "[WRITER] invoked with: \n%s\n", incoming_hdr);
 
-  // have a 1-1 mapping between threadios and recent dump times.  Given
-  // size of the buffer, about 100 seems appropriate.
-  // Since the buffers are 1s, use UTC time stamps.
-  time_t dump_times[MAX_THREADIOS] = {0};
-  // this really needs to be the size of the number of buffers!
-  // but 100 here should be plenty
-  char* bufs_to_write[100] = {NULL};
-  time_t times_to_write[100] = {0};
-
   //Try to connect to existing data block
   dada_hdu_set_key (hdu,key);
   if (dada_hdu_connect(hdu) < 0)
@@ -546,13 +469,8 @@ int main(int argc, char** argv)
   // set up multi-cast sockets
   int mc_control_sock = open_mc_socket (mc_vlitegrp, MC_WRITER_PORT,
       "Control Socket [Writer]", &maxsock, mlog);
-  char mc_from[24]; //ip address of multicast sender
+  //char mc_from[24]; //ip address of multicast sender
   char mc_control_buf[32];
-  
-  int mc_trigger_sock = open_mc_socket (mc_vlitegrp, MC_TRIGGER_PORT,
-      "Trigger Socket [Writer]", &maxsock, mlog);
-  char mc_trigger_buf[sizeof(trigger_t)*MAX_TRIGGERS];
-  trigger_t* trigger_queue[MAX_TRIGGERS] = {NULL};
   
   char mc_info_buf[MSGMAXSIZE];
   int mc_info_sock = open_mc_socket (mc_obsinfogrp, MULTI_OBSINFO_PORT,
@@ -583,23 +501,10 @@ int main(int argc, char** argv)
   ssize_t raw_bytes_read = 0;
   ssize_t ipcio_bytes_written = 0;
 
-  int break_loop = 0;
-
   while (1) {
-
-    // new, simplified control loop handling stateless triggering.  (In
-    // general, there is no reason to expect we might not have finished an
-    // observation by the time we realize there is a transient in the data!)
-    //
-    // Thus, on each iteration, we check the control socket, the trigger
-    // socket, and the raw data socket.  Regardless of state, we read any
-    // available data.  However, if we are not in STATE_STARTED, we simply
-    // discard it.  As before, when we read data we try to read 20 frames
-    // simply to avoid calling select 20 times.  (We know there will be data.)
 
     FD_ZERO (&readfds);
     FD_SET (mc_control_sock, &readfds);
-    FD_SET (mc_trigger_sock, &readfds);
     FD_SET (mc_info_sock, &readfds);
     FD_SET (raw.svc, &readfds);
     if (select (maxsock+1,&readfds,NULL,NULL,&tv_500mus) < 0)
@@ -699,67 +604,6 @@ int main(int argc, char** argv)
       }
     }
 
-    // check for triggers
-    if (FD_ISSET (mc_trigger_sock, &readfds))
-    {
-      int nbytes = MultiCastReceive (mc_trigger_sock, mc_trigger_buf,
-          sizeof(trigger_t)*MAX_TRIGGERS, mc_from);
-      int ntrigger = nbytes / sizeof(trigger_t);
-      multilog (mlog, LOG_INFO, "Received %d triggers.\n", ntrigger);
-      if (ntrigger > MAX_TRIGGERS)
-      {
-        multilog (mlog, LOG_INFO, "Truncating trigger list to fit.\n");
-        ntrigger = MAX_TRIGGERS;
-      }
-      if ((nbytes == 0)  || ((nbytes-ntrigger*sizeof(trigger_t))!=0))
-      {
-        multilog (mlog, LOG_ERR,
-            "Error on Trigger socket, return value = %d\n",nbytes);  
-        continue;
-      }
-      for (int i=0; i < ntrigger; ++i)
-      {
-        fprintf (stderr, "working on trigger %d\n",i);
-        trigger_t* trig = (trigger_t*) (mc_trigger_buf) + i;
-        trigger_queue[i] = trig;
-        multilog (mlog, LOG_INFO,
-            "(writer) received a trigger with t0=%.3f and t1=%.3f and meta %s.\n",
-            trig->t0,trig->t1,trig->meta);
-      }
-    }
-
-    // process triggers
-    if (trigger_queue[0] != NULL)
-    {
-      fprintf (stderr, "here5\n");
-      fflush (stderr);
-      // determine which buffers to dump
-      ipcbuf_t* buf = (ipcbuf_t *) hdu->data_block;; 
-      int nbufs = ipcbuf_get_nbufs(buf);
-      int bufsz = ipcbuf_get_bufsz(buf);
-      int nbufs_to_write = get_buffer_trigger_overlap (
-          buf->buffer, nbufs, trigger_queue,
-          dump_times, bufs_to_write, times_to_write);
-      multilog (mlog, LOG_INFO,
-          "Dumping out %d buffers with the following UTC timestamps:\n",nbufs_to_write);
-      dump_req_t dump = {.buf_local=NULL,.bufsz=bufsz};
-      strcpy (dump.hostname, hostname);
-      for (int ibuf=0; ibuf < nbufs_to_write; ++ibuf) {
-        dump.buf_in = bufs_to_write[ibuf];
-        int sid = getVDIFStationID ((vdif_header*)bufs_to_write[ibuf]);
-        snprintf (dump.fname, 255,"%s/%s_ea%02d_%li.vdif",
-            EVENTDIR,currt_string,sid,times_to_write[ibuf]);
-        multilog (mlog, LOG_INFO, ".... UTC %li writing to %s\n",
-            times_to_write[ibuf], dump.fname);
-        if (MulticastSend (mc_vlitegrp, MC_DUMPER_PORT, (const char *)(&dump), sizeof(dump_req_t)) < 0) {
-          exit (EXIT_FAILURE);
-        }
-      }
-      // remove triggers from queue
-      for (int i=0; i < MAX_TRIGGERS; ++i)
-        trigger_queue[i] = NULL;
-    }
-
     // read packets from the raw socket
     if (FD_ISSET (raw.svc, &readfds))
     {
@@ -778,16 +622,25 @@ int main(int argc, char** argv)
             //exit (EXIT_FAILURE);
             // change 9/5/2019 -- break out of multi-packet loop instead of failing
             break;
-
           }
           else
           {
             //multilog (mlog, LOG_ERR, "Received anomalous packet size: %d, aborting obs.\n", raw_bytes_read);
-            multilog (mlog, LOG_ERR,
-                "Received anomalous packet size: %d.  Continuing.\n", raw_bytes_read);
-            //stop_observation (hdu, mlog, &packets_written, &state);
-            //abnormal_stop = 1;
-            continue;
+            anom_count++;
+            if (anom_count  < max_anom_count1) {
+              multilog (mlog, LOG_ERR,
+                  "Received anomalous packet size: %d.  Continuing.\n", raw_bytes_read);
+              continue;
+            }
+            else if (anom_count==max_anom_count1) {
+              multilog (mlog, LOG_ERR,
+                  "Received %d anomalous packets.  Suppressing further packet error messages.\n", max_anom_count1);
+            }
+            else if (anom_count>=max_anom_count2) {
+              multilog (mlog, LOG_ERR,
+                  "Received %d anomalous packets (%d).  Too many!  Halting.\n", max_anom_count2);
+              break;
+            }
           }
         }
 
@@ -804,15 +657,19 @@ int main(int argc, char** argv)
           frame_diff = vdif_frame_difference (fill_vdhdr, vdhdr);
 
         // TMP -- sanity check
-        if (frame_diff < 1)
-        {
-          fprintf (stderr, "frame difference is %d, should not be possible!\n",frame_diff);
-          fprintf (stderr, "hdr1: sec, frame, threadid=%d %d %d\n",fill_vdhdr->seconds,fill_vdhdr->frame,fill_vdhdr->threadid);
-          fprintf (stderr, "hdr2: sec, frame, threadid=%d %d %d\n",vdhdr->seconds,vdhdr->frame,vdhdr->threadid);
-        }
+        assert (frame_diff >= 0);
 
-        if (frame_diff > 1)
-          multilog (mlog, LOG_ERR, "Found %d skipped frames.\nCurrent  frame=%d, thread=%d.\nPrevious frame=%d, thread=%d.\n",frame_diff-1,read_frame,read_thread,fill_vdhdr->frame,fill_vdhdr->threadid!=0);
+        // Check for missing frames and bail it has happened too many times.
+        if (frame_diff > 1) {
+          if (skipped_frames < max_skipped_frames1)
+            multilog (mlog, LOG_ERR, "Found %d skipped frames.\nCurrent  frame=%d, thread=%d.\nPrevious frame=%d, thread=%d.\n",frame_diff-1,read_frame,read_thread,fill_vdhdr->frame,fill_vdhdr->threadid!=0);
+          else if (skipped_frames == max_skipped_frames1)
+            multilog (mlog, LOG_ERR, "Exceeded %d skipped frame instances, suppressing additional warnings.\n",max_skipped_frames1);
+          else if (skipped_frames >= max_skipped_frames2) {
+            multilog (mlog, LOG_ERR, "Exceeded %d skipped frame instances, aborting!\n",max_skipped_frames2);
+            exit (EXIT_FAILURE);
+          }
+        }
         
         for (int iframe = frame_diff; iframe > 0; --iframe)
         {
@@ -950,12 +807,6 @@ int main(int argc, char** argv)
         } // end loop over received (and possibly) skipped) frame(s)
       } // end multiple packet read
     } // end raw socket read logic
-
-    if (break_loop)
-    {
-      multilog (mlog, LOG_INFO, "Breaking main loop by request.\n");
-      stop_observation (hdu, mlog, &packets_written, &state);
-    }
   } // end main loop over state/packets
   
   return exit_status;
